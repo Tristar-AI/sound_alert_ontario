@@ -1,0 +1,17 @@
+# Secrets — keep .env_template tracked as the placeholder
+.env
+.env.*
+!.env_template
+!.env.example
+!.env.sample
+
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+secrets.yaml
+secrets.yml
+secrets.toml
+__pycache__/

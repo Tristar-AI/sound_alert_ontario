@@ -1,0 +1,86 @@
+import psycopg2
+from psycopg2.extensions import connection as psycopg2_connection
+from typing import Any, Optional
+from constant import DB_CONFIG, LINE_1, LINE_4, LINE_5, LINE_9, LINE_TESTING
+from loguru import logger
+
+
+class StationStatusDao:
+    def __init__(self):
+        self._db_conn: Optional[psycopg2_connection] = None
+
+    @property
+    def is_open(self):
+        return self._db_conn is not None
+
+    def open(self, timeout: float = 1.0):
+        if not self._db_conn:
+            self._db_conn = psycopg2.connect(**DB_CONFIG)
+        else:
+            raise Exception("Cannot open connection, connection already open.")
+
+    def close(self):
+        if self._db_conn is not None:
+            try:
+                self._db_conn.close()
+            except Exception:
+                pass
+        self._db_conn = None
+
+    def get_status(self, team_id: int, factory_id: int, station_id: int):
+        if self.is_open:
+            res = False
+            query = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM current_status
+                    WHERE team_id = %s
+                    AND factory_id = %s
+                    AND station_id = %s
+                    AND status_name = 'paused'
+                    AND removed_at IS NULL
+                ) AS is_paused
+            """
+            if self._db_conn is not None:
+                with self._db_conn as conn:
+                    cur = conn.cursor()
+                    cur.execute(query, (team_id, factory_id, station_id))
+                    result = cur.fetchone()
+
+                if result is not None:
+                    res = result[0]
+            return res
+        else:
+            raise Exception("No DB connection.")
+
+
+def get_defect_status(
+    team_id: int,
+    factory_id: int,
+    station_id: int,
+) -> bool:
+    query = """
+        select
+            sum(uc.val) > 0 as defects_visible
+        from
+            unacked_count uc
+        where
+            team_id = %(team_id)s
+            and factory_id = %(factory_id)s
+            and station_id = %(station_id)s
+    """
+
+    params = {
+        "team_id": team_id,
+        "factory_id": factory_id,
+        "station_id": station_id,
+    }
+
+    with psycopg2.connect(**DB_CONFIG) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
+            return bool(row[0]) if row and row[0] is not None else False
+
+if __name__ == "__main__":
+    pass
