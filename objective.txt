@@ -1,0 +1,54 @@
+Use the database query in get_latest_database_values.py 
+from the get_defect_status() to see if there is current a defect. 
+
+Constantly query the database. 
+If get_defect_status() indicates there is a defect present, 
+play the sound using the play_sound() from speaker_handler.py.
+If get_defect_status() indicates there is not a defect present, 
+stop the sound using the stop_all() functional in the
+speaker_handler.py function. 
+
+Update the existing files to meet this objective. 
+
+Draft an implementation plan for the following task in `@my_new_project/`
+following `@plan-architecture.mdc`.
+Save it to `docs/plans/YYYY-MM-DD-<short-name>.md`.
+Do not write application code.
+## Objective
+<one sentence: what exists when we’re done>
+## Constraints
+- language / runtime / GPU / APIs
+- must integrate with X / must not do Y
+- secrets via env vars only (name them)
+## Inputs / outputs
+- in: …
+- out: …
+## Workflow (user-facing)
+1. …
+2. …
+## Reuse (optional — specific files only)
+@path/to/one_file.py — pattern for …
+@other/project/foo.py — how we upload to Roboflow
+## Open decisions (ask me before drafting if material)
+- …Draft an implementation plan for the following task in `@my_new_project/`
+following `@plan-architecture.mdc`.
+Save it to `docs/plans/YYYY-MM-DD-<short-name>.md`.
+Do not write application code.
+## Objective
+<one sentence: what exists when we’re done>
+## Constraints
+- language / runtime / GPU / APIs
+- must integrate with X / must not do Y
+- secrets via env vars only (name them)
+## Inputs / outputs
+- in: …
+- out: …
+## Workflow (user-facing)
+1. …
+2. …
+## Reuse (optional — specific files only)
+@path/to/one_file.py — pattern for …
+@other/project/foo.py — how we upload to Roboflow
+## Open decisions (ask me before drafting if material)
+- …
+

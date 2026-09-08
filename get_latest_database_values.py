@@ -1,7 +1,8 @@
+import contextlib
 import psycopg2
 from psycopg2.extensions import connection as psycopg2_connection
 from typing import Any, Optional
-from constant import DB_CONFIG, LINE_1, LINE_4, LINE_5, LINE_9, LINE_TESTING
+from constant import DB_CONFIG
 from loguru import logger
 
 
@@ -76,11 +77,12 @@ def get_defect_status(
         "station_id": station_id,
     }
 
-    with psycopg2.connect(**DB_CONFIG) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            row = cur.fetchone()
-            return bool(row[0]) if row and row[0] is not None else False
+    with contextlib.closing(psycopg2.connect(**DB_CONFIG)) as conn:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+                return bool(row[0]) if row and row[0] is not None else False
 
 if __name__ == "__main__":
     pass

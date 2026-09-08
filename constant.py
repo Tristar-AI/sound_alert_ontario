@@ -2,43 +2,55 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-SERIAL_PORT = os.getenv('SERIAL_PORT')
-BAUD_RATE = os.getenv('BAUD_RATE')
-SERIAL_PORT = "/dev/ttyUSB0"
-BAUD_RATE = 9600
+LINE_NAME = os.getenv('LINE_NAME')
+DEVICE = os.getenv('AUDIO_DEVICE', 'plughw:0,0')
+CHECK_INTERVAL = float(os.getenv('CHECK_INTERVAL', '1.0'))
+
+
+def _required_int(key: str) -> int:
+    """Read an env var and coerce to int; raise EnvironmentError with the key name if absent or non-integer."""
+    val = os.getenv(key)
+    if val is None:
+        raise EnvironmentError(f"Required environment variable '{key}' is not set")
+    try:
+        return int(val)
+    except ValueError:
+        raise EnvironmentError(f"Environment variable '{key}' must be an integer, got: {val!r}")
+
 
 LINE_11 = {
-    'TEAM_ID': os.getenv('TEAM_ID_1'),
-    'FACTORY_ID': os.getenv('FACTORY_ID_1'),
-    'STATION_ID': os.getenv('STATION_ID_1'),
-    'LINE_EMAIL_ID': os.getenv('LINE_1_EMAIL_ID'),
+    'TEAM_ID': _required_int('TEAM_ID_11'),
+    'FACTORY_ID': _required_int('FACTORY_ID_11'),
+    'STATION_ID': _required_int('STATION_ID_11'),
     'SOUND': os.getenv('SOUND_11'),
 }
 
 LINE_12 = {
-    'TEAM_ID': os.getenv('TEAM_ID_4'),
-    'FACTORY_ID': os.getenv('FACTORY_ID_4'),
-    'STATION_ID': os.getenv('STATION_ID_4'),
-    'LINE_EMAIL_ID': os.getenv('LINE_4_EMAIL_ID'),
+    'TEAM_ID': _required_int('TEAM_ID_12'),
+    'FACTORY_ID': _required_int('FACTORY_ID_12'),
+    'STATION_ID': _required_int('STATION_ID_12'),
     'SOUND': os.getenv('SOUND_12'),
 }
 
-
 LINE_TESTING = {
-    'TEAM_ID': os.getenv('TEAM_ID_TESTING'),
-    'FACTORY_ID': os.getenv('FACTORY_ID_TESTING'),
-    'STATION_ID': os.getenv('STATION_ID_TESTING'),
-    'LINE_EMAIL_ID': os.getenv('LINE_TESTING_EMAIL_ID'),
+    'TEAM_ID': _required_int('TEAM_ID_TESTING'),
+    'FACTORY_ID': _required_int('FACTORY_ID_TESTING'),
+    'STATION_ID': _required_int('STATION_ID_TESTING'),
     'SOUND': os.getenv('SOUND_TESTING'),
 }
 
 
+def _required_str(key: str) -> str:
+    """Read an env var as a string; raise OSError with the key name if absent."""
+    val = os.getenv(key)
+    if not val:
+        raise OSError(f"Required environment variable '{key}' is not set")
+    return val
+
 
 DB_CONFIG = {
-    'host': os.getenv('HOST', 'dashboard.c7blcbt6vhon.us-east-1.rds.amazonaws.com'),
-    'database': os.getenv('DATABASE', 'production'),
-    'user': os.getenv('DB_USER', 'spectrum_stacklight_ro'),
-    'password': os.getenv('PASSWORD', ''),
+    'host': _required_str('HOST'),
+    'database': _required_str('DATABASE'),
+    'user': _required_str('DB_USER'),
+    'password': _required_str('PASSWORD'),
 }
-
-RABBIT_URL = f"amqp://{os.getenv('RABBIT_USER')}:{os.getenv('RABBIT_PS')}@{os.getenv('RABBIT_HOST')}:{os.getenv('RABBIT_PORT')}/"
