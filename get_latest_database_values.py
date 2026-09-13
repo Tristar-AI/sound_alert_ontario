@@ -5,7 +5,23 @@ from psycopg2.extensions import connection as psycopg2_connection
 from typing import Any, Optional
 from constant import DB_CONFIG
 from loguru import logger
-TESTING=os.getenv('TESTING')
+
+
+def _testing_override(val: Optional[str]) -> Optional[bool]:
+    """Parse TESTING as a bool override. Unset/empty means 'use the database'."""
+    if val is None:
+        return None
+    normalized = val.strip().strip("\"'").lower()
+    if normalized == "":
+        return None
+    if normalized in ("1", "true", "yes"):
+        return True
+    if normalized in ("0", "false", "no"):
+        return False
+    raise ValueError(f"TESTING must be true/false (or empty), got: {val!r}")
+
+
+TESTING = _testing_override(os.getenv("TESTING"))
 
 
 class StationStatusDao:
@@ -66,8 +82,8 @@ def get_defect_status(
     Returns whether or not there is a defect actively on the dashboard page.
 
     """
-    if TESTING not in (None, ""): # If testing, can set return value
-        return bool(TESTING)
+    if TESTING is not None:  # If testing, can set return value
+        return TESTING
     
     query = """
         select
