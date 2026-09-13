@@ -2,7 +2,7 @@
 
 ## Status
 
-**In progress** — Steps 1–5 complete. Step 6 blocked (infrastructure not available in dev sandbox; see Step 6 log). Step 7 complete.
+**In progress** — Steps 1–5 complete. Step 6 blocked (infrastructure not available in dev sandbox; see Step 6 log). Steps 7–8 complete. Step 9 (send test defects) not started. Step 10 (CLI line selection + `TESTING` override) complete as-built 2026-09-13.
 
 - **Owner:** Hannah
 - **Scope:** `sound_alert_ontario/` only. No changes to `spectrum_speaker/` or any other project.
@@ -59,6 +59,15 @@ today.** The plan must fix these before the behavior is even reachable.
 > [Risks & Edge Cases](#risks--edge-cases) R1, because it means a database outage silences a live
 > alarm rather than holding it.
 
+### As-built revisions (2026-09-13)
+
+These replace the Step 5 `LINE_NAME` / `--once` surface. Historical Step 5 logs stay as recorded; invoke the daemon as `./venv/bin/python monitor.py {11|12|testing}` from here on.
+
+| Decision | Choice | Consequence for the design |
+|---|---|---|
+| Line selection | **positional argparse `line`** (`11` / `12` / `testing`) | `monitor.py` is invoked as `python monitor.py testing`. argparse rejects an unset or unknown value before the process starts (exit 2). `LINE_NAME` is leftover in `constant.py` and is no longer read by the daemon. |
+| Local defect injection | **`TESTING` env var** | Parsed by `_testing_override()` in `get_latest_database_values.py`. `true`/`1`/`yes` → `get_defect_status()` returns `True` without opening a connection; `false`/`0`/`no` → returns `False`; unset or empty → query the database. Invalid values raise `ValueError` at import. |
+
 ---
 
 ## Architecture & Technical Approach
@@ -66,14 +75,15 @@ today.** The plan must fix these before the behavior is even reachable.
 ### Data flow
 
 ```
-monitor.py  (owns the loop, 1 Hz)
+monitor.py  (owns the loop, 1 Hz; argv: line ∈ {11, 12, testing})
   │
-  ├─ constant.py ──────────── LINE_NAME → LINE_11 | LINE_12 | LINE_TESTING
+  ├─ load_line(args.line) ─── _LINE_MAP → LINE_11 | LINE_12 | LINE_TESTING
   │                           → team_id, factory_id, station_id, sound path
-  │                           → DEVICE, CHECK_INTERVAL, DB_CONFIG
+  │                           DEVICE, CHECK_INTERVAL, DB_CONFIG from constant.py
   │
   ├─ get_latest_database_values.get_defect_status(team, factory, station) -> bool
-  │      SELECT sum(uc.val) > 0 FROM unacked_count WHERE team/factory/station
+  │      TESTING set ─────────► return that bool (no DB)
+  │      TESTING unset ───────► SELECT sum(uc.val) > 0 FROM unacked_count
   │      raises on DB failure ─────► caught in monitor.py ──► treated as False
   │
   └─ speaker_handler.SpeakerHandler
@@ -145,11 +155,11 @@ consumes it directly and adds no thresholds, debouncing, or defect-type filterin
 
 | # | Path | Action | Why |
 |---|---|---|---|
-| 1 | `constant.py` | Modify | Add `DEVICE`, `CHECK_INTERVAL`, `LINE_NAME`; fix the `LINE_11`/`LINE_12` env-key mismatch (#13, #14, #15) |
-| 2 | `get_latest_database_values.py` | Modify | Fix the broken `constant` import (#5) and the connection leak (#6) |
+| 1 | `constant.py` | Modify | Add `DEVICE`, `CHECK_INTERVAL`; fix the `LINE_11`/`LINE_12` env-key mismatch (#13, #14, #15). `LINE_NAME` was added in Step 2 and is leftover after Step 10 (daemon no longer reads it). |
+| 2 | `get_latest_database_values.py` | Modify | Fix the broken `constant` import (#5) and the connection leak (#6). Step 10 adds the `TESTING` short-circuit in `get_defect_status()`. |
 | 3 | `speaker_handler.py` | Modify | Fix the constructor (#1-#4), make `play_sound()` loop, make play/stop idempotent |
-| 4 | `monitor.py` | Modify | Add imports, wire `SoundController`, implement the poll loop and `close()`, replace the `config.yaml` lookup (#7-#12, #17) |
-| 5 | `.env_template` | Modify | Publish the new `LINE_NAME`, `AUDIO_DEVICE`, `CHECK_INTERVAL` keys. **Beyond the four files you listed** — required because `.env_template` is the tracked contract for env keys, and Step 1 corrects a mismatch that already exists between it and `constant.py` |
+| 4 | `monitor.py` | Modify | Add imports, wire `SoundController`, implement the poll loop and `close()`, replace the `config.yaml` lookup (#7-#12, #17). Step 10 selects the line from a required positional argparse `line` instead of `LINE_NAME`. |
+| 5 | `.env_template` | Modify | Publish `AUDIO_DEVICE`, `CHECK_INTERVAL`, and (Step 10) `TESTING`. **Beyond the four files you listed** — required because `.env_template` is the tracked contract for env keys, and Step 1 corrects a mismatch that already exists between it and `constant.py` |
 | 6 | `requirements.txt` | **Create** | Does not exist; `psycopg2`, `loguru`, `python-dotenv` are imported but undeclared, so no verification step is reproducible without it. New-file creation is the one pre-approved deviation under `workflow.mdc` |
 
 Not touched: `StationStatusDao` and its `get_status()` pause query
@@ -164,7 +174,9 @@ Names only, per `plan-architecture.mdc`. No values appear in this plan.
   `SOUND_11`, `TEAM_ID_12`, `FACTORY_ID_12`, `STATION_ID_12`, `SOUND_12`, `TEAM_ID_TESTING`,
   `FACTORY_ID_TESTING`, `STATION_ID_TESTING`, `SOUND_TESTING`, `HOST`, `DATABASE`, `DB_USER`,
   `PASSWORD`
-- **New in this plan:** `LINE_NAME`, `AUDIO_DEVICE`, `CHECK_INTERVAL`
+- **New in this plan:** `AUDIO_DEVICE`, `CHECK_INTERVAL`
+- **Added 2026-09-13 (Step 10):** `TESTING` — bool override for `get_defect_status()`. Unset or empty means "use the database". Published at the top of `.env_template` with the comment `Should be unset if not testing`.
+- **Superseded:** `LINE_NAME` — Step 2/5 selection key. Still assigned in `constant.py` but unused by `monitor.py`; not in `.env_template`. Line is chosen by the positional `line` argument instead.
 
 ---
 
@@ -523,6 +535,8 @@ Non-zero exit, message names `LINE_NAME` and accepted values. ✓
 
 What we learned: `--once` does not instantiate `SpeakerHandler`, so a missing WAV file does not block field probes. The fail-silent ERROR log is fully visible even though the daemon continues; per R1, this is the designed behaviour.
 
+**Superseded 2026-09-13 (Step 10):** line selection is now the positional argparse `line` argument, not `LINE_NAME`. `--once` was removed; the field-probe path is `TESTING=true|false` plus `./venv/bin/python monitor.py testing`. Historical commands and logs above are left as recorded.
+
 ---
 
 ### Step 6 — End-to-end behavior against the testing line
@@ -534,8 +548,8 @@ Run the daemon against `LINE_TESTING` and drive `unacked_count` for the testing 
 
 **Verification Criteria**
 
-With `LINE_NAME=testing ./venv/bin/python monitor.py` running in Terminal A, observe in
-Terminal B across a defect being raised and then acknowledged:
+With `./venv/bin/python monitor.py testing` running in Terminal A (`TESTING` unset so the
+database is live), observe in Terminal B across a defect being raised and then acknowledged:
 
 1. Defect raised → within 2 s, `pgrep -fa aplay` is non-empty and the log shows exactly **one**
    transition line. Sound is audible.
@@ -600,7 +614,7 @@ without a yes.
 3. Make `HOST`, `DATABASE`, and `DB_USER` in `DB_CONFIG` required rather than falling back to the
    hardcoded literals at `constant.py:38-40`. Those fallbacks mean a machine with a missing `.env`
    silently connects to the production RDS instance under a real username instead of failing.
-   `PASSWORD` should likewise not default to `''`.
+   `PASSWOR**Fix:**D` should likewise not default to `''`.
 
 **Verification Criteria**
 
@@ -696,6 +710,249 @@ to a 4-file repair with hardware and database dependencies, but it means regress
 caught. The state mapping in Step 5 is the piece most worth a real unit test later, against a fake
 speaker handler.
 
+**R10 — `TESTING` left set silences or forces the live alarm.**
+`get_defect_status()` returns the override and never opens a connection when `TESTING` is
+non-empty. A leftover `TESTING=true` in `.env` on the Ontario host would sound continuously
+regardless of `unacked_count`; `TESTING=false` would stay silent through a real defect. Mitigation:
+`.env_template` says the key should be unset if not testing; `_testing_override()` treats empty as
+"use the database"; invalid values fail at import rather than falling through. Confirm `TESTING` is
+unset before any production start.
+
+---
+
+### Step 8 — Eliminate idle-in-transaction on database connections
+
+**Files:** `get_latest_database_values.py`
+
+**Problem:** psycopg2 defaults to `autocommit = False`. Before the first `execute()` it issues
+`BEGIN` and leaves the session **idle in transaction** until the `SELECT` arrives; after the
+result comes back, it stays idle in transaction until `COMMIT`. If the server's
+`idle_in_transaction_session_timeout` fires in either gap, the client is dropped. Both code paths
+are affected:
+
+- `get_defect_status()` (`get_latest_database_values.py:80-85`) opens a new connection per poll
+  and wraps it in `with conn:` (transaction commit/rollback) without autocommit. The
+  `BEGIN`/`COMMIT` round trips bracket a single read-only `SELECT` that needs neither.
+- `StationStatusDao.open()` (`line 17-21`) connects but never sets autocommit, so every
+  `get_status()` call also runs inside `BEGIN`/`COMMIT`.
+- `StationStatusDao.get_status()` (`line 46`) uses `with self._db_conn as conn:`, which is a
+  transaction context under the default mode and reintroduces the same window on the long-lived
+  connection.
+
+The queries return a single boolean row. The window at risk is the protocol round-trip delay, not
+query execution time (a slow query would show as `active`, which the connection reaper does not
+target).
+
+**Fix:**
+
+1. **`get_defect_status()`** — after `psycopg2.connect(**DB_CONFIG)` inside `contextlib.closing`,
+   set `conn.autocommit = True`. Remove the inner `with conn:` block; it is a transaction context
+   that is both unnecessary (read-only, single statement) and harmful (reintroduces the
+   idle-in-transaction window). Keep `contextlib.closing` for socket cleanup. Open the cursor
+   directly on `conn`. SQL, signature, and return contract are unchanged.
+
+2. **`StationStatusDao.open()`** — set `self._db_conn.autocommit = True` immediately after
+   `psycopg2.connect(**DB_CONFIG)`. This covers every subsequent `get_status()` call on the
+   long-lived connection without requiring `get_status()` itself to touch the connection mode.
+
+3. **`StationStatusDao.get_status()`** — replace `with self._db_conn as conn:` with a direct
+   cursor open on `self._db_conn` (e.g. `with self._db_conn.cursor() as cur:`). Under autocommit,
+   `with conn:` opens a transaction context, undoing the fix from step 2.
+
+These are read-only existence/sum checks; they do not need multi-statement transaction semantics.
+Signatures, SQL, and return contracts are unchanged. `StationStatusDao` was explicitly left
+untouched in Step 3 (`Not touched` note in the file inventory); this step makes the minimum
+addition to close the idle-in-transaction window there.
+
+**Verification Criteria**
+
+Confirm `with conn:` / `with self._db_conn as conn:` is absent from both patched paths (these
+are the tell-tale transaction contexts):
+
+```bash
+grep -n "with conn\b\|with self\._db_conn as" get_latest_database_values.py
+```
+
+No matches.
+
+Confirm `autocommit = True` appears in both locations — once in `get_defect_status` and once in
+`StationStatusDao.open`:
+
+```bash
+grep -n "autocommit" get_latest_database_values.py
+```
+
+Two matches, one in each function.
+
+Import and signature smoke-check (no live DB required):
+
+```bash
+./venv/bin/python -c "
+import inspect
+from get_latest_database_values import get_defect_status, StationStatusDao
+print('get_defect_status sig:', inspect.signature(get_defect_status))
+print('get_status sig:', inspect.signature(StationStatusDao.get_status))
+print('ok')
+"
+```
+
+Prints both signatures and `ok`, exits 0. No `ImportError`, no `NameError`.
+
+Confirm the fd-delta check from Step 3 still holds (connection still closed per poll despite
+structural change):
+
+```bash
+./venv/bin/python -c "
+import os
+from get_latest_database_values import get_defect_status
+from constant import LINE_TESTING as L
+def fds(): return len(os.listdir(f'/proc/{os.getpid()}/fd'))
+for _ in range(5): 
+    try: get_defect_status(L['TEAM_ID'], L['FACTORY_ID'], L['STATION_ID'])
+    except Exception: pass
+before = fds()
+for _ in range(60):
+    try: get_defect_status(L['TEAM_ID'], L['FACTORY_ID'], L['STATION_ID'])
+    except Exception: pass
+print('fd delta:', fds() - before)
+"
+```
+
+`fd delta: 0`. The autocommit restructuring must not reintroduce the socket leak that Step 3 fixed.
+
+**Log (2026-09-11):**
+
+Three changes applied to `get_latest_database_values.py`:
+1. `get_defect_status()` — added `conn.autocommit = True` after `psycopg2.connect`; removed the
+   inner `with conn:` transaction context. Cursor opened directly on `conn`.
+2. `StationStatusDao.open()` — added `self._db_conn.autocommit = True` immediately after connect.
+3. `StationStatusDao.get_status()` — replaced `with self._db_conn as conn: cur = conn.cursor()`
+   with `with self._db_conn.cursor() as cur:`, eliminating the transaction context under autocommit.
+
+**Criterion 1 — no transaction contexts:**
+```
+with conn:      → exit 1 (no matches)
+with self._db_conn as  → exit 1 (no matches)
+```
+Note: the plan's grep pattern `with conn\b` also matches `with conn.cursor()` (word boundary
+before `.`). The only remaining match on line 82 is `with conn.cursor() as cur:` — a cursor
+context manager, not a transaction context. Both exact transaction patterns are absent.
+
+**Criterion 2 — two autocommit lines:**
+```
+20:            self._db_conn.autocommit = True
+81:        conn.autocommit = True
+```
+
+**Criterion 3 — import/signature smoke-check:**
+```
+get_defect_status sig: (team_id: int, factory_id: int, station_id: int) -> bool
+get_status sig: (self, team_id: int, factory_id: int, station_id: int)
+ok
+exit=0
+```
+Note: `.env` has `CHECK_INTERVAL=` and all `TEAM_ID_*` etc. set to empty strings. Shell env vars
+supplied explicitly take priority over `load_dotenv()` (which does not override by default). This
+is a pre-existing environment state, not introduced by this step.
+
+**Criterion 4 — fd delta:**
+```
+fd delta: 0
+```
+
+What we learned: `contextlib.closing` correctly closes the socket even without `with conn:`. Under
+`autocommit = True`, `with conn:` would open a new transaction context — removing it was required,
+not just optional. `StationStatusDao.get_status()` now opens a cursor directly on the
+already-autocommit connection, so no `BEGIN`/`COMMIT` wraps the single read-only SELECT.
+
+---
+
+### Step 9 — Add in a file to send test defects
+
+**Files:** `send_defect_amqp.py`
+
+**Problem:** Need to be able to send test defects to the internal dashboard in order to test this process. 
+
+1. Copy the 'send_defect_amqp.py" file from the "spectrum_sound" directory. 
+2. Change the line, station, factory to read from this .env file.
+
+---
+
+### Step 10 — CLI line selection and `TESTING` override ✓ COMPLETE
+
+**Files:** `monitor.py`, `get_latest_database_values.py`, `.env_template`
+
+**Problem:** Step 5 selected the line via `LINE_NAME` and used `--once` as the DB-free field
+probe. Operators now choose the line on the command line, and local speaker tests need a way to
+force `get_defect_status()` true or false without writing `unacked_count`.
+
+**As-built (2026-09-13):**
+
+1. **`monitor.py`** — required positional argparse `line` with `choices=("11", "12", "testing")`.
+   `load_line()` looks the value up in `_LINE_MAP`. argparse rejects a missing or unknown `line`
+   before `main()` runs (exit 2). `--once` is gone. `LINE_NAME` is no longer imported.
+2. **`get_latest_database_values.py`** — `_testing_override()` parses `TESTING` at import.
+   Unset or empty → `None` (query the database). `1`/`true`/`yes` → `True`; `0`/`false`/`no` →
+   `False`; anything else raises `ValueError`. When the override is not `None`,
+   `get_defect_status()` returns it and does not connect.
+3. **`.env_template`** — `TESTING=` published at the top with `Should be unset if not testing`.
+   `LINE_NAME` is not in the template.
+
+`LINE_NAME = os.getenv('LINE_NAME')` remains in `constant.py` as a leftover from Step 2. It has no
+caller. Leaving it is the smallest as-built diff; delete it in a later cleanup if desired.
+
+**Verification Criteria** (observed 2026-09-13):
+
+```bash
+./venv/bin/python monitor.py --help
+```
+
+```
+usage: monitor.py [-h] {11,12,testing}
+...
+positional arguments:
+  {11,12,testing}  Line to monitor (11, 12, or testing)
+```
+
+```bash
+./venv/bin/python monitor.py; echo "exit=$?"
+./venv/bin/python monitor.py nonsense; echo "exit=$?"
+```
+
+```
+monitor.py: error: the following arguments are required: line
+exit=2
+monitor.py: error: argument line: invalid choice: 'nonsense' (choose from 11, 12, testing)
+exit=2
+```
+
+```bash
+TESTING=true  ./venv/bin/python -c "from get_latest_database_values import get_defect_status, TESTING; print(TESTING, get_defect_status(1,2,3))"
+TESTING=false ./venv/bin/python -c "from get_latest_database_values import get_defect_status, TESTING; print(TESTING, get_defect_status(1,2,3))"
+TESTING=      ./venv/bin/python -c "from get_latest_database_values import TESTING; print(TESTING)"
+TESTING=maybe ./venv/bin/python -c "from get_latest_database_values import TESTING"
+```
+
+```
+True True
+False False
+None
+ValueError: TESTING must be true/false (or empty), got: 'maybe'
+exit=1
+```
+
+The `true`/`false` paths return without a database connection (no fail-silent ERROR log). Empty
+`TESTING` leaves the override as `None`, so the next poll uses the query.
+
+**To drive the speaker without a live defect row:**
+
+```bash
+TESTING=true ./venv/bin/python monitor.py testing
+```
+
+Unset `TESTING` (or set it empty) before any Ontario-host run so the database remains the source
+of truth. See R10.
+
 ---
 
 ## Notes
@@ -705,3 +962,5 @@ speaker handler.
   moves.
 - No secrets, credentials, hostnames, or connection strings appear above — only environment
   variable names and `path:line` citations.
+- 2026-09-13: Step 10 records the as-built CLI (`python monitor.py {11|12|testing}`) and the
+  `TESTING` override. Historical Step 5 `LINE_NAME` / `--once` commands are superseded, not rewritten.
