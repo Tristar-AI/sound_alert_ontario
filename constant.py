@@ -7,35 +7,24 @@ DEVICE = os.getenv('AUDIO_DEVICE', 'plughw:0,0')
 CHECK_INTERVAL = float(os.getenv('CHECK_INTERVAL', '1.0'))
 
 
-def _required_int(key: str) -> int:
-    """Read an env var and coerce to int; raise EnvironmentError with the key name if absent or non-integer."""
-    val = os.getenv(key)
-    if val is None:
-        raise EnvironmentError(f"Required environment variable '{key}' is not set")
-    try:
-        return int(val)
-    except ValueError:
-        raise EnvironmentError(f"Environment variable '{key}' must be an integer, got: {val!r}")
-
-
 LINE_11 = {
-    'TEAM_ID': _required_int('TEAM_ID_11'),
-    'FACTORY_ID': _required_int('FACTORY_ID_11'),
-    'STATION_ID': _required_int('STATION_ID_11'),
+    'TEAM_ID': os.getenv('TEAM_ID_11'),
+    'FACTORY_ID': os.getenv('FACTORY_ID_11'),
+    'STATION_ID': os.getenv('STATION_ID_11'),
     'SOUND': os.getenv('SOUND_11'),
 }
 
 LINE_12 = {
-    'TEAM_ID': _required_int('TEAM_ID_12'),
-    'FACTORY_ID': _required_int('FACTORY_ID_12'),
-    'STATION_ID': _required_int('STATION_ID_12'),
+    'TEAM_ID': os.getenv('TEAM_ID_12'),
+    'FACTORY_ID': os.getenv('FACTORY_ID_12'),
+    'STATION_ID': os.getenv('STATION_ID_12'),
     'SOUND': os.getenv('SOUND_12'),
 }
 
 LINE_TESTING = {
-    'TEAM_ID': _required_int('TEAM_ID_TESTING'),
-    'FACTORY_ID': _required_int('FACTORY_ID_TESTING'),
-    'STATION_ID': _required_int('STATION_ID_TESTING'),
+    'TEAM_ID': os.getenv('TEAM_ID_TESTING'),
+    'FACTORY_ID': os.getenv('FACTORY_ID_TESTING'),
+    'STATION_ID': os.getenv('STATION_ID_TESTING'),
     'SOUND': os.getenv('SOUND_TESTING'),
 }
 

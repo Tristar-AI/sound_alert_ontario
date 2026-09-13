@@ -1,30 +1,20 @@
 import argparse
-import os
 import signal
 import sys
 import time
 
 from loguru import logger
 
-from constant import CHECK_INTERVAL, DEVICE, LINE_11, LINE_12, LINE_NAME, LINE_TESTING
+from constant import CHECK_INTERVAL, DEVICE, LINE_11, LINE_12, LINE_TESTING
 from get_latest_database_values import get_defect_status
 from speaker_handler import SpeakerHandler
 
 _LINE_MAP = {
-    '11': LINE_11,
-    '12': LINE_12,
-    'testing': LINE_TESTING,
+    "11": LINE_11,
+    "12": LINE_12,
+    "testing": LINE_TESTING,
 }
 
-
-def _resolve_line(name: str | None) -> dict:
-    """Return the line config dict for LINE_NAME, or raise ValueError naming valid values."""
-    if name not in _LINE_MAP:
-        valid = sorted(_LINE_MAP)
-        raise ValueError(
-            f"LINE_NAME={name!r} is not recognized. Set LINE_NAME to one of: {valid}"
-        )
-    return _LINE_MAP[name]
 
 
 class SoundController:
@@ -73,33 +63,36 @@ class SoundController:
             self.close()
 
 
+def load_line(line: str) -> dict:
+    if line not in _LINE_MAP:
+        valid = ", ".join(_LINE_MAP)
+        raise ValueError(f"line={line!r} is not recognized. Use one of: {valid}")
+    return _LINE_MAP[line]
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Defect sound alert daemon")
+    parser = argparse.ArgumentParser(description="Factory line sound alert")
     parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Poll once, log the defect state, and exit without touching the speaker",
+        "line",
+        choices=tuple(_LINE_MAP),
+        help="Line to monitor (11, 12, or testing)",
     )
     args = parser.parse_args()
 
-    line_config = _resolve_line(LINE_NAME)
-    team_id = line_config['TEAM_ID']
-    factory_id = line_config['FACTORY_ID']
-    station_id = line_config['STATION_ID']
-    sound = line_config['SOUND']
+    try:
+        line_config = load_line(args.line)
+    except (EnvironmentError, ValueError) as exc:
+        logger.error(str(exc))
+        sys.exit(1)
+
+    team_id = line_config["TEAM_ID"]
+    factory_id = line_config["FACTORY_ID"]
+    station_id = line_config["STATION_ID"]
+    sound = line_config["SOUND"]
 
     logger.info(
-        f"line={LINE_NAME!r} team={team_id} factory={factory_id} station={station_id}"
+        f"line={args.line!r} team={team_id} factory={factory_id} station={station_id}"
     )
-
-    if args.once:
-        try:
-            defect = get_defect_status(team_id, factory_id, station_id)
-        except Exception as exc:
-            logger.error(f"defect poll failed, treating as no-defect: {exc}")
-            defect = False
-        logger.info(f"defect={defect}")
-        sys.exit(0)
 
     controller = SoundController(
         team_id=team_id,
