@@ -16,3 +16,11 @@ secrets.yml
 secrets.toml
 __pycache__/
 .cursor/
+
+# Local virtualenvs — never commit site-packages
+venv/
+.venv/
+
+# Local alert audio — keep files on disk, do not track
+alert_a.wav
+alert_b.wav

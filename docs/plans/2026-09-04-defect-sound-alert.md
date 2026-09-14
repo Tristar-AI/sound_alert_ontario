@@ -157,7 +157,7 @@ consumes it directly and adds no thresholds, debouncing, or defect-type filterin
 |---|---|---|---|
 | 1 | `constant.py` | Modify | Add `DEVICE`, `CHECK_INTERVAL`; fix the `LINE_11`/`LINE_12` env-key mismatch (#13, #14, #15). `LINE_NAME` was added in Step 2 and is leftover after Step 10 (daemon no longer reads it). |
 | 2 | `get_latest_database_values.py` | Modify | Fix the broken `constant` import (#5) and the connection leak (#6). Step 10 adds the `TESTING` short-circuit in `get_defect_status()`. |
-| 3 | `speaker_handler.py` | Modify | Fix the constructor (#1-#4), make `play_sound()` loop, make play/stop idempotent |
+| 3 | `speaker_handler.py` | Modifyrm  | Fix the constructor (#1-#4), make `play_sound()` loop, make play/stop idempotent |
 | 4 | `monitor.py` | Modify | Add imports, wire `SoundController`, implement the poll loop and `close()`, replace the `config.yaml` lookup (#7-#12, #17). Step 10 selects the line from a required positional argparse `line` instead of `LINE_NAME`. |
 | 5 | `.env_template` | Modify | Publish `AUDIO_DEVICE`, `CHECK_INTERVAL`, and (Step 10) `TESTING`. **Beyond the four files you listed** — required because `.env_template` is the tracked contract for env keys, and Step 1 corrects a mismatch that already exists between it and `constant.py` |
 | 6 | `requirements.txt` | **Create** | Does not exist; `psycopg2`, `loguru`, `python-dotenv` are imported but undeclared, so no verification step is reproducible without it. New-file creation is the one pre-approved deviation under `workflow.mdc` |
