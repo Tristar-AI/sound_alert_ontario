@@ -2,7 +2,7 @@
 
 ## Status
 
-**In progress** — Steps 1–5 complete. Step 6 blocked (infrastructure not available in dev sandbox; see Step 6 log). Steps 7–8 complete. Step 9 (send test defects) not started. Step 10 (CLI line selection + `TESTING` override) complete as-built 2026-09-13.
+**In progress** — Steps 1–5 complete. Step 6 blocked (infrastructure not available in dev sandbox; see Step 6 log). Steps 7–8 complete. Step 9 (send test defects) not started. Step 10 (CLI line selection + `TESTING` override) complete as-built 2026-09-13. Step 11 (bounded timeouts) complete 2026-09-14. Step 12 (retry/hold/stop DB error handling) complete 2026-09-14.
 
 - **Owner:** Hannah
 - **Scope:** `sound_alert_ontario/` only. No changes to `spectrum_speaker/` or any other project.
@@ -67,6 +67,20 @@ These replace the Step 5 `LINE_NAME` / `--once` surface. Historical Step 5 logs 
 |---|---|---|
 | Line selection | **positional argparse `line`** (`11` / `12` / `testing`) | `monitor.py` is invoked as `python monitor.py testing`. argparse rejects an unset or unknown value before the process starts (exit 2). `LINE_NAME` is leftover in `constant.py` and is no longer read by the daemon. |
 | Local defect injection | **`TESTING` env var** | Parsed by `_testing_override()` in `get_latest_database_values.py`. `true`/`1`/`yes` → `get_defect_status()` returns `True` without opening a connection; `false`/`0`/`no` → returns `False`; unset or empty → query the database. Invalid values raise `ValueError` at import. |
+
+### Revision (2026-09-14): database error handling
+
+This **supersedes** the "Database error handling — fail-silent" row above and delivers the R1
+follow-up (an N-consecutive-failure threshold, with N=3). The historical fail-silent decision is
+left as recorded; the loop no longer implements it. Steps 11–12 carry the change.
+
+| Decision | Choice | Consequence for the design |
+|---|---|---|
+| Query/connection failure | **Hold the last DB state and retry the connection** | The loop no longer maps an error straight to "no defect". On failure it keeps the last observed state (the speaker is left untouched) and retries. |
+| Retry cadence | **Within-tick, back-to-back** | On failure the loop retries the reconnect+requery immediately, each connect bounded by `CONNECT_TIMEOUT`. During a prolonged outage the loop blocks in the retry helper (R11). |
+| Stop threshold | **3 failed retries → stop the sound** | `MAX_HOLD_RETRIES = 3`. After 3 retries fail the sound stops (base state = silent), but retries continue until the DB returns and the live state is re-queried immediately. |
+| Base state | **Silent** | Used when there is no prior DB-derived state (startup) and after the retry threshold is crossed. |
+| Timeout source | **`CONNECT_TIMEOUT` (default 2.0) in `constant.py`** | Wired into `DB_CONFIG` as `connect_timeout` and a `statement_timeout` option, so both `get_defect_status()` and `StationStatusDao` inherit bounded connect and query time. |
 
 ---
 
@@ -155,11 +169,11 @@ consumes it directly and adds no thresholds, debouncing, or defect-type filterin
 
 | # | Path | Action | Why |
 |---|---|---|---|
-| 1 | `constant.py` | Modify | Add `DEVICE`, `CHECK_INTERVAL`; fix the `LINE_11`/`LINE_12` env-key mismatch (#13, #14, #15). `LINE_NAME` was added in Step 2 and is leftover after Step 10 (daemon no longer reads it). |
-| 2 | `get_latest_database_values.py` | Modify | Fix the broken `constant` import (#5) and the connection leak (#6). Step 10 adds the `TESTING` short-circuit in `get_defect_status()`. |
+| 1 | `constant.py` | Modify | Add `DEVICE`, `CHECK_INTERVAL`; fix the `LINE_11`/`LINE_12` env-key mismatch (#13, #14, #15). `LINE_NAME` was added in Step 2 and is leftover after Step 10 (daemon no longer reads it). Step 11 adds `CONNECT_TIMEOUT` and wires `connect_timeout`/`statement_timeout` into `DB_CONFIG`. |
+| 2 | `get_latest_database_values.py` | Modify | Fix the broken `constant` import (#5) and the connection leak (#6). Step 10 adds the `TESTING` short-circuit in `get_defect_status()`. Step 11 leaves it **unchanged** — the bounded timeouts arrive via `DB_CONFIG`. |
 | 3 | `speaker_handler.py` | Modifyrm  | Fix the constructor (#1-#4), make `play_sound()` loop, make play/stop idempotent |
-| 4 | `monitor.py` | Modify | Add imports, wire `SoundController`, implement the poll loop and `close()`, replace the `config.yaml` lookup (#7-#12, #17). Step 10 selects the line from a required positional argparse `line` instead of `LINE_NAME`. |
-| 5 | `.env_template` | Modify | Publish `AUDIO_DEVICE`, `CHECK_INTERVAL`, and (Step 10) `TESTING`. **Beyond the four files you listed** — required because `.env_template` is the tracked contract for env keys, and Step 1 corrects a mismatch that already exists between it and `constant.py` |
+| 4 | `monitor.py` | Modify | Add imports, wire `SoundController`, implement the poll loop and `close()`, replace the `config.yaml` lookup (#7-#12, #17). Step 10 selects the line from a required positional argparse `line` instead of `LINE_NAME`. Step 12 adds `MAX_HOLD_RETRIES`, `_outage_stopped`, and `_read_defect()`, replacing the fail-silent block in `monitor_continuous()`. |
+| 5 | `.env_template` | Modify | Publish `AUDIO_DEVICE`, `CHECK_INTERVAL`, (Step 10) `TESTING`, and (Step 11) `CONNECT_TIMEOUT`. **Beyond the four files you listed** — required because `.env_template` is the tracked contract for env keys, and Step 1 corrects a mismatch that already exists between it and `constant.py` |
 | 6 | `requirements.txt` | **Create** | Does not exist; `psycopg2`, `loguru`, `python-dotenv` are imported but undeclared, so no verification step is reproducible without it. New-file creation is the one pre-approved deviation under `workflow.mdc` |
 
 Not touched: `StationStatusDao` and its `get_status()` pause query
@@ -176,6 +190,7 @@ Names only, per `plan-architecture.mdc`. No values appear in this plan.
   `PASSWORD`
 - **New in this plan:** `AUDIO_DEVICE`, `CHECK_INTERVAL`
 - **Added 2026-09-13 (Step 10):** `TESTING` — bool override for `get_defect_status()`. Unset or empty means "use the database". Published at the top of `.env_template` with the comment `Should be unset if not testing`.
+- **Added 2026-09-14 (Step 11):** `CONNECT_TIMEOUT` — seconds bounding each DB connect and (as `statement_timeout`) each query. Default `2.0` when unset.
 - **Superseded:** `LINE_NAME` — Step 2/5 selection key. Still assigned in `constant.py` but unused by `monitor.py`; not in `.env_template`. Line is chosen by the positional `line` argument instead.
 
 ---
@@ -718,6 +733,20 @@ regardless of `unacked_count`; `TESTING=false` would stay silent through a real 
 "use the database"; invalid values fail at import rather than falling through. Confirm `TESTING` is
 unset before any production start.
 
+**R11 — Blocking daemon during a prolonged outage (Step 12).**
+The within-tick retry blocks `monitor_continuous()` until the database returns. SIGTERM and Ctrl-C
+latency is therefore bounded by `CONNECT_TIMEOUT` (2 s) plus one `self.interval` sleep — both
+interruptible, and the SIGTERM handler installed in Step 5 still fires. Acceptable for a
+single-purpose daemon; if responsiveness ever matters more, move the retry to a per-tick counter
+(the across-tick alternative that was considered and rejected for this design).
+
+**R12 — Passive hold does not self-heal a dead player (Step 12).**
+During the retry window the loop leaves the speaker untouched to "keep the last state", so if the
+looping player process dies on its own mid-outage it is not restarted until the database recovers
+and the next `play_sound()` runs. The exposure is bounded by the outage duration. The alternative —
+re-asserting the last state on every retry — was rejected as heavier than the literal "keep the
+last state" requirement.
+
 ---
 
 ### Step 8 — Eliminate idle-in-transaction on database connections
@@ -952,6 +981,213 @@ TESTING=true ./venv/bin/python monitor.py testing
 
 Unset `TESTING` (or set it empty) before any Ontario-host run so the database remains the source
 of truth. See R10.
+
+---
+
+### Step 11 — Bounded connection and query timeouts
+
+**Files:** `constant.py`, `.env_template`
+
+The retry policy in Step 12 depends on a connect that fails *fast* rather than hanging on the OS
+default (~2 minutes). This step gives every DB connection a bounded connect time and a bounded
+query time, sourced from one env-driven constant.
+
+1. Add `CONNECT_TIMEOUT = float(os.getenv('CONNECT_TIMEOUT', '2.0'))` to `constant.py`.
+2. Wire it into `DB_CONFIG`:
+   - `'connect_timeout': int(CONNECT_TIMEOUT)` — bounds the TCP/auth handshake.
+   - `'options': f"-c statement_timeout={int(CONNECT_TIMEOUT * 1000)}"` — bounds a query that
+     hangs after the connection is established (in ms).
+   Both `get_defect_status()` and `StationStatusDao` inherit these via `DB_CONFIG`; no change to
+   `get_latest_database_values.py` is required.
+3. Publish `CONNECT_TIMEOUT=` in `.env_template` as an empty key.
+
+**Verification Criteria**
+
+With the populated `.env` (or inline stub IDs, as in prior steps):
+
+```bash
+./venv/bin/python -c "
+import constant
+print('CONNECT_TIMEOUT', constant.CONNECT_TIMEOUT)
+print('connect_timeout', constant.DB_CONFIG['connect_timeout'])
+print('options', constant.DB_CONFIG['options'])
+"
+```
+
+Prints `2.0`, `connect_timeout 2`, and an `options` string containing `statement_timeout=2000`.
+
+Step 2's key-coverage diff still passes (every `getenv` key is published):
+
+```bash
+diff <(grep -oP "getenv\('\K[A-Z_0-9]+" constant.py | sort -u) \
+     <(grep -oP '^\K[A-Z_0-9]+' .env_template | sort -u)
+```
+
+No left-only (`<`) lines; `CONNECT_TIMEOUT` appears on both sides.
+
+Optional (network; may be `[blocked]` in the sandbox) — a connect to a blackhole IP raises within
+~2 s, proving `connect_timeout` is effective rather than falling back to the OS default:
+
+```bash
+HOST=10.255.255.1 ./venv/bin/python -c "
+import time, constant, psycopg2
+t=time.time()
+try: psycopg2.connect(**constant.DB_CONFIG)
+except Exception as e: print('raised in', round(time.time()-t,1), 's:', type(e).__name__)
+"
+```
+
+Elapsed near 2 s (not ~2 min).
+
+**Step 11 log — 2026-09-14**
+
+Changes: `CONNECT_TIMEOUT = float(os.getenv('CONNECT_TIMEOUT', '2.0'))` added to `constant.py`; `DB_CONFIG` extended with `'connect_timeout': int(CONNECT_TIMEOUT)` and `'options': f"-c statement_timeout={int(CONNECT_TIMEOUT * 1000)}"`. `CONNECT_TIMEOUT=` published in `.env_template`.
+
+Verification output:
+```
+CONNECT_TIMEOUT 2.0
+connect_timeout 2
+options -c statement_timeout=2000
+```
+Key-coverage diff: `CONNECT_TIMEOUT` on both sides ✓. `LINE_NAME` remains a single `<`-only line — documented as intentional at plan lines 194 and 928 (leftover from Step 2, unused since Step 10). Optional blackhole-connect test was sandbox-blocked (expected per plan note).
+
+---
+
+### Step 12 — Retry, hold-last-state, and stop-after-3 policy in the poll loop
+
+**Files:** `monitor.py`
+
+Replace the fail-silent boundary (currently maps any query exception to `defect = False` and stops
+the sound immediately, `monitor.py:42-56`) with the retry-hold-stop policy from the 2026-09-14
+revision. `get_defect_status()` stays a single-attempt query that raises on failure; the loop owns
+the policy. Each retry call opens and disposes its own connection via the existing
+`contextlib.closing` in `get_latest_database_values.py`, so "dispose the connection" needs no new
+code.
+
+1. Add a module constant `MAX_HOLD_RETRIES = 3`.
+2. Add `self._outage_stopped = False` to `SoundController.__init__`.
+3. Add a `_read_defect()` method that returns the defect bool, applying the policy:
+
+   ```python
+   def _read_defect(self) -> bool:
+       """Return the current defect state, holding the last state and retrying on failure.
+
+       On failure: keep the last observed state (leave the speaker untouched) and retry the
+       connection back-to-back (each connect bounded by CONNECT_TIMEOUT via DB_CONFIG). After
+       MAX_HOLD_RETRIES failed retries, stop the sound once, then keep retrying until the
+       database returns and re-query immediately.
+       """
+       try:
+           return get_defect_status(self.team_id, self.factory_id, self.station_id)
+       except Exception as exc:
+           logger.error(f"defect poll failed, holding last state and retrying: {exc}")
+
+       retries = 0
+       while True:
+           retries += 1
+           if retries > MAX_HOLD_RETRIES and not self._outage_stopped:
+               logger.error(
+                   f"database unavailable after {MAX_HOLD_RETRIES} retries; stopping sound"
+               )
+               self.speaker_handler.stop_all()
+               self._outage_stopped = True
+           time.sleep(self.interval)  # guard against a busy-spin on fast-failing connects
+           try:
+               defect = get_defect_status(self.team_id, self.factory_id, self.station_id)
+           except Exception as exc:
+               logger.error(f"retry {retries} failed: {exc}")
+               continue
+           if self._outage_stopped:
+               logger.info("database recovered; resuming from live state")
+               self._outage_stopped = False
+           return defect
+   ```
+
+4. Rewrite the loop body in `monitor_continuous()` (currently `monitor.py:42-56`) to call
+   `defect = self._read_defect()` instead of the fail-silent `try/except`, keeping the
+   transition-only logging and the `play_sound()`/`stop_all()` mapping unchanged.
+
+Counting: the initial poll failure triggers the retry loop; the sound stops at the start of the
+4th loop iteration — i.e. after retries 1–3 have all failed. The last state is held (speaker
+untouched) through retries 1–3.
+
+**Verification Criteria** (sandbox-runnable; no DB or audio, fakes injected)
+
+Fail-then-recover-after-3 — holds last state, stops once after the 3rd retry, resumes on recovery:
+
+```bash
+./venv/bin/python - <<'PY'
+import monitor
+class FakeSpeaker:
+    def __init__(self): self.calls=[]
+    def play_sound(self): self.calls.append("play")
+    def stop_all(self): self.calls.append("stop")
+monitor.SpeakerHandler = lambda sound, device: FakeSpeaker()
+c = monitor.SoundController(team_id=1, factory_id=2, station_id=3, sound="x", interval=0.01)
+seq = [Exception("down")]*4 + [True]
+def fake_get(*a, **k):
+    v = seq.pop(0)
+    if isinstance(v, Exception): raise v
+    return v
+monitor.get_defect_status = fake_get
+c.speaker_handler.calls.clear()          # last state = playing (held)
+r = c._read_defect()
+print("result", r, "calls", c.speaker_handler.calls, "outage_stopped", c._outage_stopped)
+PY
+```
+
+Prints `result True calls ['stop'] outage_stopped False` — exactly one stop (after 3 failed
+retries), no premature stop during the hold window, flag reset on recovery.
+
+Recover-within-3 — never stops the sound:
+
+```bash
+./venv/bin/python - <<'PY'
+import monitor
+class FakeSpeaker:
+    def __init__(self): self.calls=[]
+    def play_sound(self): self.calls.append("play")
+    def stop_all(self): self.calls.append("stop")
+monitor.SpeakerHandler = lambda sound, device: FakeSpeaker()
+c = monitor.SoundController(team_id=1, factory_id=2, station_id=3, sound="x", interval=0.01)
+seq = [Exception("down"), Exception("down"), False]
+def fake_get(*a, **k):
+    v = seq.pop(0)
+    if isinstance(v, Exception): raise v
+    return v
+monitor.get_defect_status = fake_get
+c.speaker_handler.calls.clear()
+r = c._read_defect()
+print("result", r, "calls", c.speaker_handler.calls, "outage_stopped", c._outage_stopped)
+PY
+```
+
+Prints `result False calls [] outage_stopped False` — last state held, no stop, no play during the
+retry window.
+
+Happy path unchanged — `TESTING=true` returns immediately with no retry, `TESTING=false` returns
+immediately (from Step 10's override), proving the retry helper does not perturb the success path.
+
+**Step 12 log (2026-09-14)**
+
+Changes to `monitor.py`:
+- Added `MAX_HOLD_RETRIES = 3` module constant (after `_LINE_MAP`).
+- Added `self._outage_stopped = False` to `SoundController.__init__`.
+- Added `_read_defect()` method implementing the hold/retry/stop-after-3 policy.
+- Replaced the fail-silent `try/except` block in `monitor_continuous()` with `defect = self._read_defect()`.
+
+Verification output:
+```
+# Test 1 (fail×4, recover True)
+result True calls ['stop'] outage_stopped False   ✓
+
+# Test 2 (fail×2, recover False within threshold)
+result False calls [] outage_stopped False         ✓
+
+# Test 3 (happy path — TESTING override)
+TESTING=true result True calls []                 ✓
+TESTING=false result False calls []               ✓
+```
 
 ---
 

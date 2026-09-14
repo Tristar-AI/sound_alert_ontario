@@ -5,6 +5,7 @@ load_dotenv()
 LINE_NAME = os.getenv('LINE_NAME')
 DEVICE = os.getenv('AUDIO_DEVICE', 'plughw:0,0')
 CHECK_INTERVAL = float(os.getenv('CHECK_INTERVAL', '1.0'))
+CONNECT_TIMEOUT = float(os.getenv('CONNECT_TIMEOUT', '2.0'))
 
 
 LINE_11 = {
@@ -42,4 +43,6 @@ DB_CONFIG = {
     'database': _required_str('DATABASE'),
     'user': _required_str('DB_USER'),
     'password': _required_str('PASSWORD'),
+    'connect_timeout': int(CONNECT_TIMEOUT),
+    'options': f"-c statement_timeout={int(CONNECT_TIMEOUT * 1000)}",
 }
