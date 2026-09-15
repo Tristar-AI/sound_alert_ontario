@@ -43,10 +43,10 @@ class SoundController:
             return None
         try:
             defect = get_defect_status(self.team_id, self.factory_id, self.station_id)
-            logger.info(f"defect poll succeeded: defect={defect}")
+            #logger.info(f"defect poll succeeded: defect={defect}")
             return defect
         except Exception as exc:
-            logger.error(f"defect poll failed, holding last state: {exc}")
+            #logger.error(f"defect poll failed, holding last state: {exc}")
             return None
 
     def _apply_result(self, defect: Optional[bool]) -> None:

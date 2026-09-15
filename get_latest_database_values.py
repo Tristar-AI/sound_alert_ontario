@@ -87,9 +87,9 @@ def get_defect_status(
     
     query = """
         select
-            sum(uc.val) > 0 as defects_visible
+            val = '#F40505' is_red
         from
-            unacked_count uc
+            operator_color
         where
             team_id = %(team_id)s
             and factory_id = %(factory_id)s
