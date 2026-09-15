@@ -43,6 +43,7 @@ def wait_until(predicate, timeout=4.0):
 
 
 def test_successive_queries_reuse_the_same_connection():
+    """Run two database checks. They should share one connection."""
     reader = make_reader(request_timeout=5)
     with patch.object(database.psycopg2, "connect", return_value=open_connection()) as fake_connect, \
          patch.object(database, "get_defect_status", return_value=False):
@@ -57,6 +58,7 @@ def test_successive_queries_reuse_the_same_connection():
 
 
 def test_second_start_while_busy_is_rejected_without_queueing():
+    """Start one slow check. A second start should fail."""
     release = threading.Event()
     calls = []
 
@@ -83,6 +85,7 @@ def test_second_start_while_busy_is_rejected_without_queueing():
 
 
 def test_ordinary_sql_error_is_reported_and_worker_is_reused():
+    """Make one check fail with bad SQL. The next check should still work."""
     outcomes = [OrdinarySQLError("syntax error"), True]
 
     def fake_status(*args, **kwargs):
@@ -110,6 +113,7 @@ def test_ordinary_sql_error_is_reported_and_worker_is_reused():
 
 
 def test_transport_failure_is_reported_then_next_start_recovers():
+    """Break the first connection. The next check should work."""
     outcomes = [OSError("connection lost"), True]
 
     def fake_status(*args, **kwargs):
@@ -135,6 +139,7 @@ def test_transport_failure_is_reported_then_next_start_recovers():
 
 
 def test_deadline_reports_error_and_bars_replacement_beside_retired_thread():
+    """Let a check take too long. Another check should not start."""
     # Short deadline/cooldown; the blocked query outlives both, so any restart
     # while it is still running would start a second worker beside it.
     release = threading.Event()
@@ -165,6 +170,7 @@ def test_deadline_reports_error_and_bars_replacement_beside_retired_thread():
 
 
 def test_reply_completed_after_deadline_is_rejected():
+    """Let one check run too long. Its late answer should be thrown away."""
     release = threading.Event()
     calls = []
 
@@ -200,6 +206,7 @@ def test_reply_completed_after_deadline_is_rejected():
 
 
 def test_cooldown_rejects_immediate_restart_then_allows_retry():
+    """Fail to connect once. A later retry should work."""
     attempts = []
     dummy = open_connection()
 
@@ -224,6 +231,7 @@ def test_cooldown_rejects_immediate_restart_then_allows_retry():
 
 
 def test_close_returns_promptly_with_blocked_query_and_bars_restart():
+    """Close while a check is stuck. It should finish fast and stay closed."""
     release = threading.Event()
     entered = []
 

@@ -51,6 +51,7 @@ def drive_monitor(monkeypatch, ctl, speaker, cycles):
 
 
 def test_startup_outage_keeps_speaker_silent(monkeypatch, live_controller):
+    """Start while the database is down. The speaker should stay quiet."""
     ctl, speaker, reader = live_controller
     reader.busy = True
     reader.poll.side_effect = [[], [DatabaseUpdate("error", error="connection lost")]]
@@ -61,6 +62,7 @@ def test_startup_outage_keeps_speaker_silent(monkeypatch, live_controller):
 
 
 def test_sounding_alarm_restarts_while_next_query_pends(monkeypatch, live_controller):
+    """Sound the alarm first. It should restart even while waiting."""
     ctl, speaker, reader = live_controller
     calls = {"count": 0}
 
@@ -93,6 +95,7 @@ def test_sounding_alarm_restarts_while_next_query_pends(monkeypatch, live_contro
 
 
 def test_sounding_alarm_persists_through_query_error(monkeypatch, live_controller):
+    """Sound the alarm first. It should keep sounding after a bad read."""
     ctl, speaker, reader = live_controller
     reader.busy = False
     reader.poll.side_effect = [
@@ -106,6 +109,7 @@ def test_sounding_alarm_persists_through_query_error(monkeypatch, live_controlle
 
 
 def test_sounding_alarm_persists_through_restart_cooldown(monkeypatch, live_controller):
+    """Sound the alarm first. It should keep sounding during a short wait."""
     ctl, speaker, reader = live_controller
     reader.busy = False
     reader.poll.side_effect = [
@@ -120,6 +124,7 @@ def test_sounding_alarm_persists_through_restart_cooldown(monkeypatch, live_cont
 
 
 def test_silence_persists_through_query_error_after_clear(monkeypatch, live_controller):
+    """Start quiet with no problem. It should stay quiet after a bad read."""
     ctl, speaker, reader = live_controller
     reader.busy = False
     reader.poll.side_effect = [
@@ -133,6 +138,7 @@ def test_silence_persists_through_query_error_after_clear(monkeypatch, live_cont
 
 
 def test_alarm_clears_on_later_successful_read(monkeypatch, live_controller):
+    """Sound the alarm first. It should stop when the problem is gone."""
     ctl, speaker, reader = live_controller
     reader.busy = False
     reader.poll.side_effect = [
@@ -146,6 +152,7 @@ def test_alarm_clears_on_later_successful_read(monkeypatch, live_controller):
 
 
 def test_testing_true_sounds_without_database(monkeypatch):
+    """Use test mode turned on. The speaker should sound."""
     speaker = FakeSpeaker()
     monkeypatch.setattr(monitor, "TESTING", True)
     monkeypatch.setattr(monitor, "SpeakerHandler", Mock(return_value=speaker))
@@ -160,6 +167,7 @@ def test_testing_true_sounds_without_database(monkeypatch):
 
 
 def test_testing_false_stays_silent_without_database(monkeypatch):
+    """Use test mode turned off. The speaker should stay quiet."""
     speaker = FakeSpeaker()
     monkeypatch.setattr(monitor, "TESTING", False)
     monkeypatch.setattr(monitor, "SpeakerHandler", Mock(return_value=speaker))
@@ -174,6 +182,7 @@ def test_testing_false_stays_silent_without_database(monkeypatch):
 
 
 def test_speaker_stop_failure_still_closes_database(monkeypatch, live_controller):
+    """Make the speaker fail to stop. The database should still close."""
     ctl, speaker, reader = live_controller
     monkeypatch.setattr(speaker, "stop_all", Mock(side_effect=RuntimeError("stop failed")))
 
@@ -184,6 +193,7 @@ def test_speaker_stop_failure_still_closes_database(monkeypatch, live_controller
 
 
 def test_database_close_failure_still_stops_speaker(live_controller):
+    """Make the database fail to close. The speaker should still stop."""
     ctl, speaker, reader = live_controller
     speaker.playing = True
     reader.close.side_effect = RuntimeError("close failed")
@@ -194,6 +204,7 @@ def test_database_close_failure_still_stops_speaker(live_controller):
 
 
 def test_loop_error_stops_speaker_and_closes_database(live_controller):
+    """The monitor hits an error. The speaker should stop. The database should close."""
     ctl, speaker, reader = live_controller
     speaker.playing = True
     reader.poll.side_effect = RuntimeError("loop failed")
@@ -206,6 +217,7 @@ def test_loop_error_stops_speaker_and_closes_database(live_controller):
 
 
 def test_closed_controller_ignores_further_monitoring(monkeypatch, live_controller):
+    """Close first, then watch again. Nothing more should happen."""
     ctl, speaker, reader = live_controller
     ctl.close()
     monkeypatch.setattr(monitor.time, "sleep", Mock(side_effect=AssertionError("loop resumed")))
