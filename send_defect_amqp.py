@@ -16,7 +16,7 @@ _LINE_MAP = {
     "testing": LINE_TESTING,
 }
 
-DEFECT_TYPE = "eyelash_large"
+DEFECT_TYPE = "eyelash_small"
 
 
 class RabbitDAO:
@@ -52,6 +52,31 @@ def send_defect_amqp(
     s3_image: str = os.getenv("S3_IMAGE"),
 ) -> Tuple[datetime.datetime, bool]:
     dt = datetime.datetime.now(datetime.timezone.utc)
+    metadata = {                               
+                "frame_count": 111,         
+                "camera_serial": "40635770",
+                "defect_areas_in_mm2": [    
+                    4.3827984               
+                ],                          
+                "defect_positions_norm": [  
+                    [                       
+                        0.5178970917225951, 
+                        0.5693359375,       
+                        0.5346756152125279, 
+                        0.583984375         
+                    ]                       
+                ]                           
+            }
+
+    print(f"s3_image={s3_image}\n")
+    print(type(s3_image))
+    print(f"\ndefect_types={defect_types}\n")
+    print(f"timestamp={dt.isoformat()}\n")
+    print(f"station_id={station_id}\n")
+    print(f"factory_id={factory_id}\n")
+    print(f"team_id={team_id}\n")
+    print(f"metadata={metadata}\n")
+
     publish_success = RABBIT_DAO_ALERT.publish(
         {
             "s3_image": s3_image,
@@ -60,6 +85,7 @@ def send_defect_amqp(
             "station_id": int(station_id),
             "factory_id": int(factory_id),
             "team_id": int(team_id),
+            "metadata": metadata
         }
     )
     return dt, publish_success
@@ -87,6 +113,8 @@ def main() -> None:
     team_id = line_config["TEAM_ID"]
     factory_id = line_config["FACTORY_ID"]
     station_id = line_config["STATION_ID"]
+
+    print(f"Sending defect for team_id={team_id}, factory_id={factory_id}, station_id={station_id}")
 
     sent_at, publish_success = send_defect_amqp(
         defect_types=[DEFECT_TYPE],

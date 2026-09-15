@@ -2,6 +2,7 @@ import argparse
 import signal
 import sys
 import time
+from typing import Optional
 
 from loguru import logger
 
@@ -23,74 +24,76 @@ class SoundController:
         self.station_id = station_id
         self.interval = interval
         self._closed = False
-        self._defect_state = None  # last observed state; None means "not yet polled"
+        self._defect_state = None  # last confirmed DB state; None means "not yet polled"
         self._outage_stopped = False
+        self._consecutive_failures = 0
 
         self.speaker_handler = SpeakerHandler(sound=sound, device=DEVICE)
 
-    def _read_defect(self) -> bool:
-        """Return the current defect state, holding the last state and retrying on failure.
+    def _keep_alarm_alive(self) -> None:
+        """Restart the speaker from last confirmed state before talking to the database."""
+        if self._closed:
+            return
+        if self._defect_state is True and not self._outage_stopped:
+            self.speaker_handler.play_sound()
 
-        On failure: keep the last state (sound/no sound) and retry the
-        connection in a loop. After MAX_HOLD_RETRIES failed retries, stop the sound, then keep retrying until the
-        database returns and re-query immediately.
-        """
-
-        # Try to get the defect status
+    def _read_defect(self) -> Optional[bool]:
+        """One bounded poll. Returns the bool on success, None on failure or shutdown."""
+        if self._closed:
+            return None
         try:
             return get_defect_status(self.team_id, self.factory_id, self.station_id)
         except Exception as exc:
-            logger.error(f"defect poll failed, holding last state and retrying: {exc}")
+            logger.error(f"defect poll failed, holding last state: {exc}")
+            return None
 
-        # If defect status query fails, continuely query the database for and updated value
-        # After MAX_HOLD_RETRIES, turn off the sound
-        retries = 0
-        while True:
-            retries += 1
-
-            # If we've retried MAX_HOLD_RETRIES times and the sound is still on, turn it off
-            if retries > MAX_HOLD_RETRIES and not self._outage_stopped:
+    def _apply_result(self, defect: Optional[bool]) -> None:
+        """Apply this tick's result, or ignore it if we have already closed."""
+        if self._closed:
+            return
+        if defect is None:
+            self._consecutive_failures += 1
+            if self._consecutive_failures > MAX_HOLD_RETRIES and not self._outage_stopped:
                 logger.error(
                     f"database unavailable after {MAX_HOLD_RETRIES} retries; stopping sound"
                 )
-                self.speaker_handler.stop_all()
+                try:
+                    self.speaker_handler.stop_all()
+                except Exception as exc:
+                    logger.error(f"speaker stop failed after outage threshold: {exc}")
                 self._outage_stopped = True
-
-            # Sleep for the interval and try to get the defect status again
-            time.sleep(self.interval)  # guard against a busy-spin on fast-failing connects
-            try:
-                defect = get_defect_status(self.team_id, self.factory_id, self.station_id)
-            except Exception as exc:
-                logger.error(f"retry {retries} failed: {exc}")
-                continue
-            if self._outage_stopped:
-                logger.info("database recovered; resuming from live state")
-                self._outage_stopped = False
-            return defect
+            return
+        if self._outage_stopped:
+            logger.info("database recovered; resuming from live state")
+            self._outage_stopped = False
+        self._consecutive_failures = 0
+        if defect != self._defect_state:
+            logger.info(f"defect={defect}")
+            self._defect_state = defect
+        if defect:
+            self.speaker_handler.play_sound()
+        else:
+            self.speaker_handler.stop_all()
 
     def close(self):
         """Stop the speaker and mark this controller as closed. Safe to call more than once."""
         if self._closed:
             return
         self._closed = True
-        self.speaker_handler.stop_all()
+        try:
+            self.speaker_handler.stop_all()
+        except Exception as exc:
+            logger.error(f"speaker stop failed during close: {exc}")
         logger.info("SoundController closed")
 
     def monitor_continuous(self):
         try:
-            while True:
+            while not self._closed:
+                self._keep_alarm_alive()
                 defect = self._read_defect()
-
-                # Log only on transitions so the journal stays readable at 1 Hz
-                if defect != self._defect_state:
-                    logger.info(f"defect={defect}")
-                    self._defect_state = defect
-
-                if defect:
-                    self.speaker_handler.play_sound()
-                else:
-                    self.speaker_handler.stop_all()
-
+                self._apply_result(defect)
+                if self._closed:
+                    break
                 time.sleep(self.interval)
 
         except KeyboardInterrupt:
@@ -141,7 +144,6 @@ def main():
     def _sigterm_handler(signum, frame):
         logger.info("SIGTERM received, shutting down")
         controller.close()
-        sys.exit(0)
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
