@@ -24,7 +24,7 @@ class SoundController:
         self.station_id = station_id
         self.interval = interval
         self._closed = False
-        self._defect_state = None  # last confirmed DB state; None means "not yet polled"
+        self._defect_state = None  # last confirmed DB state. None means "not yet polled"
         self._outage_stopped = False
         self._consecutive_failures = 0
 
@@ -42,18 +42,20 @@ class SoundController:
         if self._closed:
             return None
         try:
-            return get_defect_status(self.team_id, self.factory_id, self.station_id)
+            defect = get_defect_status(self.team_id, self.factory_id, self.station_id)
+            logger.info(f"defect poll succeeded: defect={defect}")
+            return defect
         except Exception as exc:
             logger.error(f"defect poll failed, holding last state: {exc}")
             return None
 
     def _apply_result(self, defect: Optional[bool]) -> None:
-        """Apply this tick's result, or ignore it if we have already closed."""
+        """Apply the database result. If closed, do nothing."""
         if self._closed:
             return
         if defect is None:
             self._consecutive_failures += 1
-            if self._consecutive_failures > MAX_HOLD_RETRIES and not self._outage_stopped:
+            if self._consecutive_failures > MAX_HOLD_RETRIES and not self._outage_stopped: 
                 logger.error(
                     f"database unavailable after {MAX_HOLD_RETRIES} retries; stopping sound"
                 )
@@ -89,7 +91,7 @@ class SoundController:
     def monitor_continuous(self):
         try:
             while not self._closed:
-                self._keep_alarm_alive()
+                self._keep_alarm_alive() # Prevents the sound from turning off during few failed db queries
                 defect = self._read_defect()
                 self._apply_result(defect)
                 if self._closed:
