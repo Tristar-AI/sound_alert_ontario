@@ -144,6 +144,8 @@ def main():
     def _sigterm_handler(signum, frame):
         logger.info("SIGTERM received, shutting down")
         controller.close()
+        sys.exit(0)
+
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
