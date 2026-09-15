@@ -5,8 +5,8 @@ import time
 
 from loguru import logger
 
-from constant import CHECK_INTERVAL, DEVICE, LINE_11, LINE_12, LINE_TESTING, MAX_HOLD_RETRIES
-from get_latest_database_values import get_defect_status
+from constant import CHECK_INTERVAL, DB_CONFIG, DEVICE, LINE_11, LINE_12, LINE_TESTING
+from get_latest_database_values import DatabaseReader, TESTING
 from speaker_handler import SpeakerHandler
 
 _LINE_MAP = {
@@ -24,61 +24,45 @@ class SoundController:
         self.interval = interval
         self._closed = False
         self._defect_state = None  # last observed state; None means "not yet polled"
-        self._outage_stopped = False
 
         self.speaker_handler = SpeakerHandler(sound=sound, device=DEVICE)
+        self._reader = DatabaseReader(DB_CONFIG, team_id, factory_id, station_id) if TESTING is None else None
 
-    def _read_defect(self) -> bool:
-        """Return the current defect state, holding the last state and retrying on failure.
+    def _read_defect(self):
+        """Return the latest completed defect state without blocking."""
+        if TESTING is not None:
+            return TESTING
 
-        On failure: keep the last state (sound/no sound) and retry the
-        connection in a loop. After MAX_HOLD_RETRIES failed retries, stop the sound, then keep retrying until the
-        database returns and re-query immediately.
-        """
-
-        # Try to get the defect status
-        try:
-            return get_defect_status(self.team_id, self.factory_id, self.station_id)
-        except Exception as exc:
-            logger.error(f"defect poll failed, holding last state and retrying: {exc}")
-
-        # If defect status query fails, continuely query the database for and updated value
-        # After MAX_HOLD_RETRIES, turn off the sound
-        retries = 0
-        while True:
-            retries += 1
-
-            # If we've retried MAX_HOLD_RETRIES times and the sound is still on, turn it off
-            if retries > MAX_HOLD_RETRIES and not self._outage_stopped:
-                logger.error(
-                    f"database unavailable after {MAX_HOLD_RETRIES} retries; stopping sound"
-                )
-                self.speaker_handler.stop_all()
-                self._outage_stopped = True
-
-            # Sleep for the interval and try to get the defect status again
-            time.sleep(self.interval)  # guard against a busy-spin on fast-failing connects
-            try:
-                defect = get_defect_status(self.team_id, self.factory_id, self.station_id)
-            except Exception as exc:
-                logger.error(f"retry {retries} failed: {exc}")
-                continue
-            if self._outage_stopped:
-                logger.info("database recovered; resuming from live state")
-                self._outage_stopped = False
-            return defect
+        assert self._reader is not None
+        defect = self._defect_state
+        for update in self._reader.poll():
+            if update.error is not None:
+                logger.error(f"defect poll failed, retaining last known state: {update.error}")
+            elif update.kind == "defect":
+                defect = update.value
+        if not self._reader.busy:
+            self._reader.start()
+        return defect
 
     def close(self):
         """Stop the speaker and mark this controller as closed. Safe to call more than once."""
         if self._closed:
             return
         self._closed = True
-        self.speaker_handler.stop_all()
+        try:
+            self.speaker_handler.stop_all()
+        except Exception as exc:
+            logger.error(f"speaker shutdown failed: {exc}")
+        try:
+            if self._reader is not None:
+                self._reader.close()
+        except Exception as exc:
+            logger.error(f"database reader shutdown failed: {exc}")
         logger.info("SoundController closed")
 
     def monitor_continuous(self):
         try:
-            while True:
+            while not self._closed:
                 defect = self._read_defect()
 
                 # Log only on transitions so the journal stays readable at 1 Hz
