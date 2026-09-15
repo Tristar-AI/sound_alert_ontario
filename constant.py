@@ -6,7 +6,7 @@ LINE_NAME = os.getenv('LINE_NAME')
 DEVICE = os.getenv('AUDIO_DEVICE', 'plughw:0,0')
 CHECK_INTERVAL = float(os.getenv('CHECK_INTERVAL', '1.0'))
 CONNECT_TIMEOUT = float(os.getenv('CONNECT_TIMEOUT', '2.0'))
-
+MAX_HOLD_RETRIES = int(os.getenv('MAX_HOLD_RETRIES', '3'))
 
 LINE_11 = {
     'TEAM_ID': os.getenv('TEAM_ID_11'),
@@ -46,3 +46,8 @@ DB_CONFIG = {
     'connect_timeout': int(CONNECT_TIMEOUT),
     'options': f"-c statement_timeout={int(CONNECT_TIMEOUT * 1000)}",
 }
+
+RABBIT_URL = (
+    f"amqp://{os.getenv('RABBIT_USER')}:{os.getenv('RABBIT_PS')}"
+    f"@{os.getenv('RABBIT_HOST')}:{os.getenv('RABBIT_PORT')}/"
+)
