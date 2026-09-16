@@ -1,7 +1,5 @@
 """Monitor state transitions with no database or audio hardware access."""
 
-from unittest.mock import Mock
-
 import pytest
 
 import monitor
@@ -11,23 +9,63 @@ from get_latest_database_values import DatabaseUpdate
 class FakeSpeaker:
     def __init__(self):
         self.playing = False
+        self.play_calls = 0
+        self.stop_calls = 0
+        self.stop_error = None
 
     def play_sound(self):
+        self.play_calls += 1
         self.playing = True
 
     def stop_all(self):
+        self.stop_calls += 1
+        if self.stop_error is not None:
+            raise self.stop_error
         self.playing = False
 
 
+class FakeReader:
+    """Behavioral DefectReader double: scripted poll replies plus busy flag."""
+
+    def __init__(self, script=(), busy=False):
+        # Each script entry is a poll reply (list of DatabaseUpdate),
+        # an exception to raise, or a zero-arg callable returning a reply.
+        self.script = list(script)
+        self.busy = busy
+        self.start_value = True
+        self.start_calls = 0
+        self.poll_calls = 0
+        self.close_calls = 0
+        self.closed = False
+        self.close_error = None
+
+    def poll(self):
+        self.poll_calls += 1
+        if self.script:
+            nxt = self.script.pop(0)
+            if callable(nxt):
+                return nxt()
+            if isinstance(nxt, BaseException):
+                raise nxt
+            return nxt
+        return []
+
+    def start(self):
+        self.start_calls += 1
+        return self.start_value
+
+    def close(self):
+        self.close_calls += 1
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
 @pytest.fixture
-def live_controller(monkeypatch):
+def live_controller():
     speaker = FakeSpeaker()
-    reader = Mock(busy=False)
-    reader.poll.return_value = []
-    monkeypatch.setattr(monitor, "TESTING", None)
-    monkeypatch.setattr(monitor, "SpeakerHandler", Mock(return_value=speaker))
-    monkeypatch.setattr(monitor, "DatabaseReader", Mock(return_value=reader))
-    ctl = monitor.SoundController(1, 2, 3, "unused")
+    reader = FakeReader(busy=False)
+    ctl = monitor.SoundController(reader=reader, speaker=speaker)
     yield ctl, speaker, reader
     ctl.close()
 
@@ -54,7 +92,7 @@ def test_startup_outage_keeps_speaker_silent(monkeypatch, live_controller):
     """Start while the database is down. The speaker should stay quiet."""
     ctl, speaker, reader = live_controller
     reader.busy = True
-    reader.poll.side_effect = [[], [DatabaseUpdate("error", error="connection lost")]]
+    reader.script = [[], [DatabaseUpdate("error", error="connection lost")]]
 
     states = drive_monitor(monkeypatch, ctl, speaker, 2)
 
@@ -64,17 +102,16 @@ def test_startup_outage_keeps_speaker_silent(monkeypatch, live_controller):
 def test_sounding_alarm_restarts_while_next_query_pends(monkeypatch, live_controller):
     """Sound the alarm first. It should restart even while waiting."""
     ctl, speaker, reader = live_controller
-    calls = {"count": 0}
 
-    def pending_poll():
-        calls["count"] += 1
-        if calls["count"] == 1:
-            reader.busy = False
-            return [DatabaseUpdate("defect", True)]
+    def first():
+        reader.busy = False
+        return [DatabaseUpdate("defect", True)]
+
+    def second():
         reader.busy = True
         return []
 
-    reader.poll.side_effect = lambda: pending_poll()
+    reader.script = [first, second]
 
     # The player dies locally after the first cycle; the next cycle must
     # restart it even though the database query is still pending.
@@ -98,7 +135,7 @@ def test_sounding_alarm_persists_through_query_error(monkeypatch, live_controlle
     """Sound the alarm first. It should keep sounding after a bad read."""
     ctl, speaker, reader = live_controller
     reader.busy = False
-    reader.poll.side_effect = [
+    reader.script = [
         [DatabaseUpdate("defect", True)],
         [DatabaseUpdate("error", error="connection lost")],
     ]
@@ -112,11 +149,11 @@ def test_sounding_alarm_persists_through_restart_cooldown(monkeypatch, live_cont
     """Sound the alarm first. It should keep sounding during a short wait."""
     ctl, speaker, reader = live_controller
     reader.busy = False
-    reader.poll.side_effect = [
+    reader.script = [
         [DatabaseUpdate("defect", True)],
         [DatabaseUpdate("error", error="connection lost")],
     ]
-    reader.start.return_value = False
+    reader.start_value = False
 
     states = drive_monitor(monkeypatch, ctl, speaker, 2)
 
@@ -127,7 +164,7 @@ def test_silence_persists_through_query_error_after_clear(monkeypatch, live_cont
     """Start quiet with no problem. It should stay quiet after a bad read."""
     ctl, speaker, reader = live_controller
     reader.busy = False
-    reader.poll.side_effect = [
+    reader.script = [
         [DatabaseUpdate("defect", False)],
         [DatabaseUpdate("error", error="connection lost")],
     ]
@@ -141,7 +178,7 @@ def test_alarm_clears_on_later_successful_read(monkeypatch, live_controller):
     """Sound the alarm first. It should stop when the problem is gone."""
     ctl, speaker, reader = live_controller
     reader.busy = False
-    reader.poll.side_effect = [
+    reader.script = [
         [DatabaseUpdate("defect", True)],
         [DatabaseUpdate("defect", False)],
     ]
@@ -152,12 +189,10 @@ def test_alarm_clears_on_later_successful_read(monkeypatch, live_controller):
 
 
 def test_testing_true_sounds_without_database(monkeypatch):
-    """Use test mode turned on. The speaker should sound."""
+    """Use a fixed true source. The speaker should sound with no database."""
     speaker = FakeSpeaker()
-    monkeypatch.setattr(monitor, "TESTING", True)
-    monkeypatch.setattr(monitor, "SpeakerHandler", Mock(return_value=speaker))
-    monkeypatch.setattr(monitor, "DatabaseReader", Mock(side_effect=AssertionError("database access")))
-    ctl = monitor.SoundController(1, 2, 3, "unused")
+    reader = monitor.StaticDefectReader(True)
+    ctl = monitor.SoundController(reader=reader, speaker=speaker)
     try:
         states = drive_monitor(monkeypatch, ctl, speaker, 1)
 
@@ -167,12 +202,10 @@ def test_testing_true_sounds_without_database(monkeypatch):
 
 
 def test_testing_false_stays_silent_without_database(monkeypatch):
-    """Use test mode turned off. The speaker should stay quiet."""
+    """Use a fixed false source. The speaker should stay quiet with no database."""
     speaker = FakeSpeaker()
-    monkeypatch.setattr(monitor, "TESTING", False)
-    monkeypatch.setattr(monitor, "SpeakerHandler", Mock(return_value=speaker))
-    monkeypatch.setattr(monitor, "DatabaseReader", Mock(side_effect=AssertionError("database access")))
-    ctl = monitor.SoundController(1, 2, 3, "unused")
+    reader = monitor.StaticDefectReader(False)
+    ctl = monitor.SoundController(reader=reader, speaker=speaker)
     try:
         states = drive_monitor(monkeypatch, ctl, speaker, 1)
 
@@ -181,48 +214,95 @@ def test_testing_false_stays_silent_without_database(monkeypatch):
         ctl.close()
 
 
-def test_speaker_stop_failure_still_closes_database(monkeypatch, live_controller):
-    """Make the speaker fail to stop. The database should still close."""
+def test_speaker_stop_failure_still_closes_reader(live_controller):
+    """Make the speaker fail to stop. The reader should still close."""
     ctl, speaker, reader = live_controller
-    monkeypatch.setattr(speaker, "stop_all", Mock(side_effect=RuntimeError("stop failed")))
+    speaker.stop_error = RuntimeError("stop failed")
 
     ctl.close()
     ctl.close()
 
-    reader.close.assert_called_once()
+    assert reader.closed
+    assert reader.close_calls == 1
 
 
-def test_database_close_failure_still_stops_speaker(live_controller):
-    """Make the database fail to close. The speaker should still stop."""
+def test_reader_close_failure_still_stops_speaker(live_controller):
+    """Make the reader fail to close. The speaker should still stop."""
     ctl, speaker, reader = live_controller
     speaker.playing = True
-    reader.close.side_effect = RuntimeError("close failed")
+    reader.close_error = RuntimeError("close failed")
 
     ctl.close()
 
     assert not speaker.playing
 
 
-def test_loop_error_stops_speaker_and_closes_database(live_controller):
-    """The monitor hits an error. The speaker should stop. The database should close."""
+def test_loop_error_stops_speaker_and_closes_reader(live_controller):
+    """The monitor hits an error. The speaker should stop. The reader should close."""
     ctl, speaker, reader = live_controller
     speaker.playing = True
-    reader.poll.side_effect = RuntimeError("loop failed")
+    reader.script = [RuntimeError("loop failed")]
 
     with pytest.raises(RuntimeError, match="loop failed"):
         ctl.monitor_continuous()
 
     assert not speaker.playing
-    reader.close.assert_called_once()
+    assert reader.closed
+    assert reader.close_calls == 1
 
 
 def test_closed_controller_ignores_further_monitoring(monkeypatch, live_controller):
     """Close first, then watch again. Nothing more should happen."""
     ctl, speaker, reader = live_controller
     ctl.close()
-    monkeypatch.setattr(monitor.time, "sleep", Mock(side_effect=AssertionError("loop resumed")))
+    polls_before = reader.poll_calls
+
+    def fail_sleep(_):
+        raise AssertionError("loop resumed")
+
+    monkeypatch.setattr(monitor.time, "sleep", fail_sleep)
 
     ctl.monitor_continuous()
 
-    reader.poll.assert_not_called()
+    assert reader.poll_calls == polls_before
     assert not speaker.playing
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("no", False),
+    ],
+)
+def test_testing_override_parsing(raw, expected):
+    """Raw TESTING text should map to a fixed override or database mode."""
+    assert monitor._testing_override(raw) == expected
+
+
+def test_testing_override_rejects_unknown():
+    """An unrecognized TESTING value should fail fast at composition time."""
+    with pytest.raises(ValueError, match="TESTING"):
+        monitor._testing_override("maybe")
+
+
+def test_build_reader_test_overrides_emit_fixed_values():
+    """Test overrides should emit their configured value without a database."""
+    for value in (True, False):
+        reader = monitor.build_reader(1, 2, 3, testing=value)
+        try:
+            updates = reader.poll()
+            assert [(update.kind, update.value) for update in updates] == [
+                ("defect", value)
+            ]
+        finally:
+            reader.close()

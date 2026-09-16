@@ -1,124 +1,13 @@
-import contextlib
-import os
-import psycopg2
-from psycopg2.extensions import connection as psycopg2_connection
-from typing import Any, Optional
-from constant import DB_CONFIG
-from loguru import logger
+"""Postgres defect source and bounded asynchronous reader."""
+
+from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any, Callable, Optional, Protocol
 
-
-def _testing_override(val: Optional[str]) -> Optional[bool]:
-    """Parse TESTING as a bool override. Unset/empty means 'use the database'."""
-    if val is None:
-        return None
-    normalized = val.strip().strip("\"'").lower()
-    if normalized == "":
-        return None
-    if normalized in ("1", "true", "yes"):
-        return True
-    if normalized in ("0", "false", "no"):
-        return False
-    raise ValueError(f"TESTING must be true/false (or empty), got: {val!r}")
-
-
-TESTING = _testing_override(os.getenv("TESTING"))
-
-
-class StationStatusDao:
-    def __init__(self):
-        self._db_conn: Optional[psycopg2_connection] = None
-
-    @property
-    def is_open(self):
-        return self._db_conn is not None
-
-    def open(self, timeout: float = 1.0):
-        if not self._db_conn:
-            self._db_conn = psycopg2.connect(**DB_CONFIG)
-            self._db_conn.autocommit = True
-        else:
-            raise Exception("Cannot open connection, connection already open.")
-
-    def close(self):
-        if self._db_conn is not None:
-            try:
-                self._db_conn.close()
-            except Exception:
-                pass
-        self._db_conn = None
-
-    def get_status(self, team_id: int, factory_id: int, station_id: int):
-        if self.is_open:
-            res = False
-            query = """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM current_status
-                    WHERE team_id = %s
-                    AND factory_id = %s
-                    AND station_id = %s
-                    AND status_name = 'paused'
-                    AND removed_at IS NULL
-                ) AS is_paused
-            """
-            if self._db_conn is not None:
-                with self._db_conn.cursor() as cur:
-                    cur.execute(query, (team_id, factory_id, station_id))
-                    result = cur.fetchone()
-
-                if result is not None:
-                    res = result[0]
-            return res
-        else:
-            raise Exception("No DB connection.")
-
-
-def get_defect_status(
-    team_id: int,
-    factory_id: int,
-    station_id: int,
-    connection=None,
-) -> bool:
-    """
-    Returns whether or not there is a defect actively on the dashboard page.
-
-    """
-    if TESTING is not None:  # If testing, can set return value
-        return TESTING
-    
-    query = """
-        select
-            sum(uc.val) > 0 as defects_visible
-        from
-            unacked_count uc
-        where
-            team_id = %(team_id)s
-            and factory_id = %(factory_id)s
-            and station_id = %(station_id)s
-    """
-
-    params = {
-        "team_id": team_id,
-        "factory_id": factory_id,
-        "station_id": station_id,
-    }
-
-    if connection is not None:
-        with connection.cursor() as cur:
-            cur.execute(query, params)
-            row = cur.fetchone()
-            return bool(row[0]) if row and row[0] is not None else False
-
-    with contextlib.closing(psycopg2.connect(**DB_CONFIG)) as conn:
-        conn.autocommit = True # Fix for the error associated with the connection reaper
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            row = cur.fetchone()
-            return bool(row[0]) if row and row[0] is not None else False
+import psycopg2
 
 
 @dataclass(frozen=True)
@@ -129,31 +18,140 @@ class DatabaseUpdate:
     completed_at: float = 0.0
 
 
+class DefectStatusUnavailable(Exception):
+    """The defect query could not reach the database; retry after cooldown."""
+
+
+class DefectStatusQueryError(Exception):
+    """The database answered with a query failure; the connection stays usable."""
+
+
+class DefectStatusSource(Protocol):
+    """Synchronous defect query.
+
+    Implementations raise DefectStatusUnavailable for transport failures and
+    DefectStatusQueryError for ordinary query failures.
+    """
+    def read_defect(self) -> bool:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
+class DefectReader(Protocol):
+    """Single-worker async reader: start one bounded query, poll without blocking."""
+
+    @property
+    def busy(self) -> bool:
+        ...
+
+    def start(self) -> bool:
+        ...
+
+    def poll(self) -> list:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
 def _error_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {str(error)[:1000]}"
 
 
-def _is_transport_error(error, connection) -> bool:
-    if connection is None or connection.closed:
-        return True
+def _is_transport_error(error: BaseException) -> bool:
     sqlstate = getattr(error, "pgcode", None) or getattr(error, "sqlstate", None)
     if sqlstate:
         return sqlstate.startswith("08") or sqlstate in ("57P01", "57P02", "57P03")
     return isinstance(error, (psycopg2.OperationalError, psycopg2.InterfaceError, OSError))
 
 
+_DEFECT_QUERY = """
+    select
+        sum(uc.val) > 0 as defects_visible
+    from
+        unacked_count uc
+    where
+        team_id = %(team_id)s
+        and factory_id = %(factory_id)s
+        and station_id = %(station_id)s
+"""
+
+
+class PostgresDefectStatusSource:
+    """Postgres-backed defect source with an injected connector."""
+
+    def __init__(
+        self,
+        config: dict,
+        team_id: int,
+        factory_id: int,
+        station_id: int,
+        *,
+        connect: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        self._config = dict(config)
+        self._team_id = team_id
+        self._factory_id = factory_id
+        self._station_id = station_id
+        self._connect = connect if connect is not None else psycopg2.connect
+        self._connection: Optional[Any] = None
+
+    def read_defect(self) -> bool:
+        try:
+            if self._connection is None or self._connection.closed:
+                connection = self._connect(**self._config)
+                connection.autocommit = True
+                self._connection = connection
+        except Exception as error:
+            self._connection = None
+            raise DefectStatusUnavailable(_error_text(error)) from error
+        try:
+            params = {
+                "team_id": self._team_id,
+                "factory_id": self._factory_id,
+                "station_id": self._station_id,
+            }
+            with self._connection.cursor() as cur:
+                cur.execute(_DEFECT_QUERY, params)
+                row = cur.fetchone()
+                return bool(row[0]) if row and row[0] is not None else False
+        except Exception as error:
+            connection = self._connection
+            if _is_transport_error(error) or connection is None or bool(getattr(connection, "closed", False)):
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+                self._connection = None
+                raise DefectStatusUnavailable(_error_text(error)) from error
+            raise DefectStatusQueryError(_error_text(error)) from error
+
+    def close(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
 class DatabaseReader:
     """Submit at most one bounded defect query and collect replies without blocking."""
 
-    def __init__(self, config, team_id, factory_id, station_id, *, request_timeout: float = 60.0, retry_interval: float = 10.0):
-        self.config = dict(config)
-        self.team_id = team_id
-        self.factory_id = factory_id
-        self.station_id = station_id
+    def __init__(
+        self,
+        source: DefectStatusSource,
+        *,
+        request_timeout: float = 60.0,
+        retry_interval: float = 10.0,
+    ) -> None:
+        self._source = source
         self.request_timeout = float(request_timeout)
         self.retry_interval = float(retry_interval)
         self._executor = ThreadPoolExecutor(max_workers=1)
-        self._connection = None
         self._future = None
         self._retired = None
         self._busy = False
@@ -166,33 +164,14 @@ class DatabaseReader:
     def busy(self) -> bool:
         return self._busy
 
-    def _run_query(self, team_id, factory_id, station_id):
+    def _run_query(self):
         try:
-            if self._connection is None or self._connection.closed:
-                self._connection = psycopg2.connect(**self.config)
-                self._connection.autocommit = True
-        except Exception as error:
-            return DatabaseUpdate("error", error=_error_text(error), completed_at=time.monotonic())
-        try:
-            value = get_defect_status(team_id, factory_id, station_id, self._connection)
+            value = self._source.read_defect()
             return DatabaseUpdate("defect", value=value, completed_at=time.monotonic())
-        except Exception as error:
-            if _is_transport_error(error, self._connection):
-                try:
-                    self._connection.close()
-                except Exception:
-                    pass
-                self._connection = None
-                return DatabaseUpdate("error", error=_error_text(error), completed_at=time.monotonic())
+        except DefectStatusUnavailable as error:
+            return DatabaseUpdate("error", error=_error_text(error), completed_at=time.monotonic())
+        except DefectStatusQueryError as error:
             return DatabaseUpdate("defect", error=_error_text(error), completed_at=time.monotonic())
-
-    def _close_connection(self):
-        connection, self._connection = self._connection, None
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
 
     def start(self) -> bool:
         if self._closed or self._busy:
@@ -207,7 +186,7 @@ class DatabaseReader:
             return False
         self._deadline = time.monotonic() + self.request_timeout
         try:
-            self._future = self._executor.submit(self._run_query, self.team_id, self.factory_id, self.station_id)
+            self._future = self._executor.submit(self._run_query)
         except (OSError, RuntimeError) as error:
             self._record_failure(_error_text(error))
             return False
@@ -273,11 +252,10 @@ class DatabaseReader:
         self._retired = None
         executor, self._executor = self._executor, None
         if executor is not None:
-            try:
-                executor.submit(self._close_connection)
-            except RuntimeError:
-                pass
+            close = getattr(self._source, "close", None)
+            if callable(close):
+                try:
+                    executor.submit(close)
+                except RuntimeError:
+                    pass
             executor.shutdown(wait=False)
-
-if __name__ == "__main__":
-    pass

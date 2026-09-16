@@ -2,24 +2,74 @@
 
 import threading
 import time
-from types import SimpleNamespace
-from unittest.mock import patch
+
+import pytest
 
 import get_latest_database_values as database
-
-CONFIG = {"host": "db.invalid", "database": "test", "user": "test", "password": "test"}
 
 
 class OrdinarySQLError(Exception):
     pgcode = "42601"
 
 
-def make_reader(**kwargs):
-    return database.DatabaseReader(CONFIG, 1, 2, 3, **kwargs)
+class FakeSource:
+    """Injectable defect source with a scripted read_defect behavior."""
+
+    def __init__(self, behavior):
+        self._behavior = behavior
+        self.calls = []
+        self.closed = False
+
+    def read_defect(self):
+        self.calls.append(threading.current_thread())
+        return self._behavior()
+
+    def close(self):
+        self.closed = True
 
 
-def open_connection():
-    return SimpleNamespace(closed=0, close=lambda: None)
+class PostgresScript:
+    """Scripted connector: each query pops one outcome; counts connections."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.connects = 0
+
+    def __call__(self, **config):
+        self.connects += 1
+        script = self
+
+        class Connection:
+            closed = 0
+            autocommit = False
+
+            def close(self):
+                self.closed = 1
+
+            def cursor(self):
+                class Cursor:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        return False
+
+                    def execute(self, query, params):
+                        kind, payload = script.outcomes.pop(0)
+                        if kind == "raise":
+                            raise payload
+                        self._row = payload
+
+                    def fetchone(self):
+                        return self._row
+
+                return Cursor()
+
+        return Connection()
+
+
+def make_reader(source, **kwargs):
+    return database.DatabaseReader(source, **kwargs)
 
 
 def collect(reader, timeout=4.0):
@@ -42,100 +92,85 @@ def wait_until(predicate, timeout=4.0):
     return False
 
 
-def test_successive_queries_reuse_the_same_connection():
-    """Run two database checks. They should share one connection."""
-    reader = make_reader(request_timeout=5)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()) as fake_connect, \
-         patch.object(database, "get_defect_status", return_value=False):
-        try:
-            for _ in range(2):
-                assert reader.start()
-                updates = collect(reader)
-                assert [(item.kind, item.value, item.error) for item in updates] == [("defect", False, None)]
-            assert fake_connect.call_count == 1
-        finally:
-            reader.close()
+def test_successive_starts_each_deliver_defect_value():
+    """Run two database checks. Each one should report what it saw."""
+    values = iter([False, True])
+    reader = make_reader(FakeSource(lambda: next(values)), request_timeout=5)
+    try:
+        for expected in (False, True):
+            assert reader.start()
+            updates = collect(reader)
+            assert [(item.kind, item.value, item.error) for item in updates] == [("defect", expected, None)]
+    finally:
+        reader.close()
 
 
 def test_second_start_while_busy_is_rejected_without_queueing():
     """Start one slow check. A second start should fail."""
     release = threading.Event()
-    calls = []
-
-    def fake_status(*args, **kwargs):
-        calls.append(1)
-        release.wait(10)
-        return True
-
-    reader = make_reader(request_timeout=10)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()), \
-         patch.object(database, "get_defect_status", side_effect=fake_status):
-        try:
-            assert reader.start()
-            assert not reader.start()
-            assert wait_until(lambda: len(calls) == 1)
-            release.set()
-            updates = collect(reader)
-            assert [(item.kind, item.value) for item in updates] == [("defect", True)]
-            assert len(calls) == 1
-            assert not reader.busy
-        finally:
-            release.set()
-            reader.close()
+    source = FakeSource(lambda: (release.wait(10), True)[1])
+    reader = make_reader(source, request_timeout=10)
+    try:
+        assert reader.start()
+        assert not reader.start()
+        assert wait_until(lambda: len(source.calls) == 1)
+        release.set()
+        updates = collect(reader)
+        assert [(item.kind, item.value) for item in updates] == [("defect", True)]
+        assert len(source.calls) == 1
+        assert not reader.busy
+    finally:
+        release.set()
+        reader.close()
 
 
 def test_ordinary_sql_error_is_reported_and_worker_is_reused():
     """Make one check fail with bad SQL. The next check should still work."""
-    outcomes = [OrdinarySQLError("syntax error"), True]
+    outcomes = [database.DefectStatusQueryError("syntax error"), True]
 
-    def fake_status(*args, **kwargs):
+    def behavior():
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
-    reader = make_reader(request_timeout=5)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()) as fake_connect, \
-         patch.object(database, "get_defect_status", side_effect=fake_status):
-        try:
-            assert reader.start()
-            first = collect(reader)
-            assert [item.kind for item in first] == ["defect"]
-            assert first[0].error is not None
+    reader = make_reader(FakeSource(behavior), request_timeout=5)
+    try:
+        assert reader.start()
+        first = collect(reader)
+        assert [item.kind for item in first] == ["defect"]
+        assert first[0].error is not None
 
-            assert reader.start()
-            second = collect(reader)
-            assert [(item.kind, item.value) for item in second] == [("defect", True)]
-            assert second[0].error is None
-            assert fake_connect.call_count == 1
-        finally:
-            reader.close()
+        assert reader.start()
+        second = collect(reader)
+        assert [(item.kind, item.value) for item in second] == [("defect", True)]
+        assert second[0].error is None
+    finally:
+        reader.close()
 
 
 def test_transport_failure_is_reported_then_next_start_recovers():
-    """Break the first connection. The next check should work."""
-    outcomes = [OSError("connection lost"), True]
+    """Break the first check. The next check should work after a short wait."""
+    outcomes = [database.DefectStatusUnavailable("connection lost"), True]
 
-    def fake_status(*args, **kwargs):
+    def behavior():
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
-    reader = make_reader(request_timeout=5, retry_interval=0.3)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()), \
-         patch.object(database, "get_defect_status", side_effect=fake_status):
-        try:
-            assert reader.start()
-            assert [item.kind for item in collect(reader)] == ["error"]
+    reader = make_reader(FakeSource(behavior), request_timeout=5, retry_interval=0.3)
+    try:
+        assert reader.start()
+        assert [item.kind for item in collect(reader)] == ["error"]
 
-            time.sleep(0.5)
-            assert reader.start()
-            second = collect(reader)
-            assert [(item.kind, item.value) for item in second] == [("defect", True)]
-            assert second[0].error is None
-        finally:
-            reader.close()
+        time.sleep(0.5)
+        assert reader.start()
+        second = collect(reader)
+        assert [(item.kind, item.value) for item in second] == [("defect", True)]
+        assert second[0].error is None
+    finally:
+        reader.close()
 
 
 def test_deadline_reports_error_and_bars_replacement_beside_retired_thread():
@@ -143,118 +178,131 @@ def test_deadline_reports_error_and_bars_replacement_beside_retired_thread():
     # Short deadline/cooldown; the blocked query outlives both, so any restart
     # while it is still running would start a second worker beside it.
     release = threading.Event()
-    entered = []
+    source = FakeSource(lambda: (release.wait(10), True)[1])
+    reader = make_reader(source, request_timeout=0.3, retry_interval=0.3)
+    try:
+        assert reader.start()
+        assert [item.kind for item in collect(reader)] == ["error"]
+        assert not reader.busy
+        assert wait_until(lambda: bool(source.calls))
+        assert source.calls[0].is_alive()
 
-    def fake_status(*args, **kwargs):
-        entered.append(threading.current_thread())
-        release.wait(10)
-        return True
-
-    reader = make_reader(request_timeout=0.3, retry_interval=0.3)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()), \
-         patch.object(database, "get_defect_status", side_effect=fake_status):
-        try:
-            assert reader.start()
-            assert [item.kind for item in collect(reader)] == ["error"]
-            assert not reader.busy
-            assert wait_until(lambda: bool(entered))
-            assert entered[0].is_alive()
-
-            time.sleep(0.5)
-            assert not reader.busy
-            assert not reader.start()
-            assert len(entered) == 1
-        finally:
-            release.set()
-            reader.close()
+        time.sleep(0.5)
+        assert not reader.busy
+        assert not reader.start()
+        assert len(source.calls) == 1
+    finally:
+        release.set()
+        reader.close()
 
 
 def test_reply_completed_after_deadline_is_rejected():
     """Let one check run too long. Its late answer should be thrown away."""
     release = threading.Event()
-    calls = []
+    source = FakeSource(
+        lambda: (release.wait(10), True)[1] if len(source.calls) == 1 else False
+    )
+    reader = make_reader(source, request_timeout=0.3, retry_interval=0.2)
+    try:
+        assert reader.start()
+        assert [item.kind for item in collect(reader)] == ["error"]
 
-    def fake_status(*args, **kwargs):
-        first = not calls
-        calls.append(threading.current_thread())
-        if first:
-            release.wait(10)
-            return True
-        return False
+        release.set()
+        seen = []
 
-    reader = make_reader(request_timeout=0.3, retry_interval=0.2)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()), \
-         patch.object(database, "get_defect_status", side_effect=fake_status):
-        try:
-            assert reader.start()
-            assert [item.kind for item in collect(reader)] == ["error"]
+        def _ready():
+            seen.extend(reader.poll())
+            return reader.start()
 
-            release.set()
-            seen = []
-
-            def _ready():
-                seen.extend(reader.poll())
-                return reader.start()
-
-            assert wait_until(_ready, timeout=4.0)
-            second = collect(reader)
-            assert [(item.kind, item.value) for item in second] == [("defect", False)]
-            assert not [u for u in seen if u.kind == "defect" and u.value is True]
-        finally:
-            release.set()
-            reader.close()
+        assert wait_until(_ready, timeout=4.0)
+        second = collect(reader)
+        assert [(item.kind, item.value) for item in second] == [("defect", False)]
+        assert not [u for u in seen if u.kind == "defect" and u.value is True]
+    finally:
+        release.set()
+        reader.close()
 
 
 def test_cooldown_rejects_immediate_restart_then_allows_retry():
-    """Fail to connect once. A later retry should work."""
-    attempts = []
-    dummy = open_connection()
+    """Fail the first check. A later retry should work."""
+    outcomes = [database.DefectStatusUnavailable("connection refused"), True]
 
-    def fake_connect(**kwargs):
-        attempts.append(1)
-        if len(attempts) == 1:
-            raise OSError("connection refused")
-        return dummy
+    def behavior():
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
-    reader = make_reader(request_timeout=2, retry_interval=0.3)
-    with patch.object(database.psycopg2, "connect", side_effect=fake_connect), \
-         patch.object(database, "get_defect_status", return_value=True):
-        try:
-            assert reader.start()
-            assert [item.kind for item in collect(reader)] == ["error"]
-            assert not reader.start()
-            time.sleep(0.5)
-            assert reader.start()
-            assert [(item.kind, item.value) for item in collect(reader)] == [("defect", True)]
-        finally:
-            reader.close()
+    reader = make_reader(FakeSource(behavior), request_timeout=2, retry_interval=0.3)
+    try:
+        assert reader.start()
+        assert [item.kind for item in collect(reader)] == ["error"]
+        assert not reader.start()
+        time.sleep(0.5)
+        assert reader.start()
+        assert [(item.kind, item.value) for item in collect(reader)] == [("defect", True)]
+    finally:
+        reader.close()
 
 
 def test_close_returns_promptly_with_blocked_query_and_bars_restart():
     """Close while a check is stuck. It should finish fast and stay closed."""
     release = threading.Event()
-    entered = []
+    source = FakeSource(lambda: (release.wait(10), True)[1])
+    reader = make_reader(source, request_timeout=10)
+    try:
+        assert reader.start()
+        assert wait_until(lambda: len(source.calls) == 1)
 
-    def fake_status(*args, **kwargs):
-        entered.append(threading.current_thread())
-        release.wait(10)
-        return True
+        started = time.monotonic()
+        reader.close()
+        elapsed = time.monotonic() - started
 
-    reader = make_reader(request_timeout=10)
-    with patch.object(database.psycopg2, "connect", return_value=open_connection()), \
-         patch.object(database, "get_defect_status", side_effect=fake_status):
-        try:
-            assert reader.start()
-            assert wait_until(lambda: len(entered) == 1)
+        assert elapsed < 1.0
+        assert not reader.start()
+        assert len(source.calls) == 1
+        assert source.calls[0].is_alive()
+    finally:
+        release.set()
+        reader.close()
 
-            started = time.monotonic()
-            reader.close()
-            elapsed = time.monotonic() - started
 
-            assert elapsed < 1.0
-            assert not reader.start()
-            assert len(entered) == 1
-            assert entered[0].is_alive()
-        finally:
-            release.set()
-            reader.close()
+def test_postgres_source_reuses_healthy_connection():
+    """Read twice through a fake connector. Both values should arrive on one connection."""
+    script = PostgresScript([("row", (False,)), ("row", (True,))])
+    source = database.PostgresDefectStatusSource(
+        {"host": "db.invalid"}, 1, 2, 3, connect=script
+    )
+    try:
+        assert source.read_defect() is False
+        assert source.read_defect() is True
+        assert script.connects == 1
+    finally:
+        source.close()
+
+
+def test_postgres_source_keeps_connection_after_ordinary_error_but_reconnects_after_transport():
+    """Fail with bad SQL, then with a dropped connection. Only the drop should reconnect."""
+    script = PostgresScript(
+        [
+            ("raise", OrdinarySQLError("syntax error")),
+            ("row", (False,)),
+            ("raise", OSError("connection lost")),
+            ("row", (True,)),
+        ]
+    )
+    source = database.PostgresDefectStatusSource(
+        {"host": "db.invalid"}, 1, 2, 3, connect=script
+    )
+    try:
+        with pytest.raises(database.DefectStatusQueryError):
+            source.read_defect()
+        assert source.read_defect() is False
+        assert script.connects == 1
+
+        with pytest.raises(database.DefectStatusUnavailable):
+            source.read_defect()
+        assert source.read_defect() is True
+        assert script.connects == 2
+    finally:
+        source.close()

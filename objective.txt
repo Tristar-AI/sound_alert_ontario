@@ -1,14 +1,14 @@
-Use the database query in get_latest_database_values.py 
-from the get_defect_status() to see if there is current a defect. 
+Use `PostgresDefectStatusSource` to read the current defect state through a
+reusable PostgreSQL connection. `DatabaseReader` runs that source through one
+bounded background worker and exposes non-blocking updates to the monitor.
 
-Constantly query the database. 
-If get_defect_status() indicates there is a defect present, 
-play the sound using the play_sound() from speaker_handler.py.
-If get_defect_status() indicates there is not a defect present, 
-stop the sound using the stop_all() functional in the
-speaker_handler.py function. 
+`SoundController` depends only on the focused reader and speaker interfaces.
+The composition root in `monitor.py` injects the PostgreSQL implementation for
+production or a static reader for the `TESTING` override.
 
-Update the existing files to meet this objective. 
+When the latest successful state reports a defect, play the configured sound.
+When it reports no defect, stop the sound. Retain the last successful state
+through transient database failures.
 
 Draft an implementation plan for the following task in `@my_new_project/`
 following `@plan-architecture.mdc`.

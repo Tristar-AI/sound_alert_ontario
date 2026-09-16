@@ -1,12 +1,19 @@
 import argparse
+import os
 import signal
 import sys
 import time
+from typing import Optional, Protocol
 
 from loguru import logger
 
 from constant import CHECK_INTERVAL, DB_CONFIG, DEVICE, LINE_11, LINE_12, LINE_TESTING
-from get_latest_database_values import DatabaseReader, TESTING
+from get_latest_database_values import (
+    DatabaseReader,
+    DatabaseUpdate,
+    DefectReader,
+    PostgresDefectStatusSource,
+)
 from speaker_handler import SpeakerHandler
 
 _LINE_MAP = {
@@ -16,24 +23,68 @@ _LINE_MAP = {
 }
 
 
+class Speaker(Protocol):
+    """Focused audio sink; SpeakerHandler satisfies this contract."""
+
+    def play_sound(self) -> None: ...
+    def stop_all(self) -> None: ...
+
+
+class StaticDefectReader:
+    """Non-database DefectReader returning a fixed defect value.
+
+    Used for TESTING true/false overrides so the controller never touches
+    the database in test mode. Matches the DatabaseReader poll/start/busy/close
+    shape so SoundController stays orchestration-only.
+    """
+
+    def __init__(self, value: bool):
+        self._value = bool(value)
+        self._closed = False
+
+    @property
+    def busy(self) -> bool:
+        return False
+
+    def poll(self) -> list:
+        if self._closed:
+            return []
+        return [DatabaseUpdate("defect", value=self._value, completed_at=time.monotonic())]
+
+    def start(self) -> bool:
+        # No background query to start; poll already carries the fixed value.
+        return False
+
+    def close(self) -> None:
+        self._closed = True
+
+
+def _testing_override(val: Optional[str]) -> Optional[bool]:
+    """Parse TESTING as a bool override. Unset/empty means 'use the database'."""
+    if val is None:
+        return None
+    normalized = val.strip().strip("\"'").lower()
+    if normalized == "":
+        return None
+    if normalized in ("1", "true", "yes"):
+        return True
+    if normalized in ("0", "false", "no"):
+        return False
+    raise ValueError(f"TESTING must be true/false (or empty), got: {val!r}")
+
+
 class SoundController:
-    def __init__(self, team_id, factory_id, station_id, sound, interval=CHECK_INTERVAL):
-        self.team_id = team_id
-        self.factory_id = factory_id
-        self.station_id = station_id
+    """Poll a reader and drive a speaker. Monitoring orchestration only."""
+
+    def __init__(self, reader: DefectReader, speaker: Speaker, interval: float = CHECK_INTERVAL):
+        self._reader = reader
+        self._speaker = speaker
         self.interval = interval
         self._closed = False
         self._defect_state = None  # last observed state; None means "not yet polled"
 
-        self.speaker_handler = SpeakerHandler(sound=sound, device=DEVICE)
-        self._reader = DatabaseReader(DB_CONFIG, team_id, factory_id, station_id) if TESTING is None else None
-
     def _read_defect(self):
         """Return the latest completed defect state without blocking."""
-        if TESTING is not None:
-            return TESTING
-
-        assert self._reader is not None
         defect = self._defect_state
         for update in self._reader.poll():
             if update.error is not None:
@@ -50,12 +101,11 @@ class SoundController:
             return
         self._closed = True
         try:
-            self.speaker_handler.stop_all()
+            self._speaker.stop_all()
         except Exception as exc:
             logger.error(f"speaker shutdown failed: {exc}")
         try:
-            if self._reader is not None:
-                self._reader.close()
+            self._reader.close()
         except Exception as exc:
             logger.error(f"database reader shutdown failed: {exc}")
         logger.info("SoundController closed")
@@ -71,9 +121,9 @@ class SoundController:
                     self._defect_state = defect
 
                 if defect:
-                    self.speaker_handler.play_sound()
+                    self._speaker.play_sound()
                 else:
-                    self.speaker_handler.stop_all()
+                    self._speaker.stop_all()
 
                 time.sleep(self.interval)
 
@@ -90,6 +140,14 @@ def load_line(line: str) -> dict:
     return _LINE_MAP[line]
 
 
+def build_reader(team_id, factory_id, station_id, testing: Optional[bool] = None) -> DefectReader:
+    """Compose the defect source. Only construction site for DatabaseReader."""
+    if testing is not None:
+        return StaticDefectReader(testing)
+    source = PostgresDefectStatusSource(DB_CONFIG, team_id, factory_id, station_id)
+    return DatabaseReader(source)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Factory line sound alert")
     parser.add_argument(
@@ -101,6 +159,7 @@ def main():
 
     try:
         line_config = load_line(args.line)
+        testing = _testing_override(os.getenv("TESTING"))
     except (EnvironmentError, ValueError) as exc:
         logger.error(str(exc))
         sys.exit(1)
@@ -114,13 +173,9 @@ def main():
         f"line={args.line!r} team={team_id} factory={factory_id} station={station_id}"
     )
 
-    controller = SoundController(
-        team_id=team_id,
-        factory_id=factory_id,
-        station_id=station_id,
-        sound=sound,
-        interval=CHECK_INTERVAL,
-    )
+    reader = build_reader(team_id, factory_id, station_id, testing=testing)
+    speaker = SpeakerHandler(sound=sound, device=DEVICE)
+    controller = SoundController(reader=reader, speaker=speaker, interval=CHECK_INTERVAL)
 
     def _sigterm_handler(signum, frame):
         logger.info("SIGTERM received, shutting down")
