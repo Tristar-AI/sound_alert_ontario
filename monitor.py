@@ -1,16 +1,14 @@
 import argparse
-import os
 import signal
 import sys
 import time
-from typing import Optional, Protocol
+from typing import Protocol
 
 from loguru import logger
 
-from constant import CHECK_INTERVAL, DB_CONFIG, DEVICE, LINE_11, LINE_12, LINE_TESTING
+from constant import CHECK_INTERVAL, DB_CONFIG, DEVICE, LINE_11, LINE_12
 from get_latest_database_values import (
     DatabaseReader,
-    DatabaseUpdate,
     DefectReader,
     PostgresDefectStatusSource,
 )
@@ -19,7 +17,6 @@ from speaker_handler import SpeakerHandler
 _LINE_MAP = {
     "11": LINE_11,
     "12": LINE_12,
-    "testing": LINE_TESTING,
 }
 
 
@@ -28,49 +25,6 @@ class Speaker(Protocol):
 
     def play_sound(self) -> None: ...
     def stop_all(self) -> None: ...
-
-
-class StaticDefectReader:
-    """Non-database DefectReader returning a fixed defect value.
-
-    Used for TESTING true/false overrides so the controller never touches
-    the database in test mode. Matches the DatabaseReader poll/start/busy/close
-    shape so SoundController stays orchestration-only.
-    """
-
-    def __init__(self, value: bool):
-        self._value = bool(value)
-        self._closed = False
-
-    @property
-    def busy(self) -> bool:
-        return False
-
-    def poll(self) -> list:
-        if self._closed:
-            return []
-        return [DatabaseUpdate("defect", value=self._value, completed_at=time.monotonic())]
-
-    def start(self) -> bool:
-        # No background query to start; poll already carries the fixed value.
-        return False
-
-    def close(self) -> None:
-        self._closed = True
-
-
-def _testing_override(val: Optional[str]) -> Optional[bool]:
-    """Parse TESTING as a bool override. Unset/empty means 'use the database'."""
-    if val is None:
-        return None
-    normalized = val.strip().strip("\"'").lower()
-    if normalized == "":
-        return None
-    if normalized in ("1", "true", "yes"):
-        return True
-    if normalized in ("0", "false", "no"):
-        return False
-    raise ValueError(f"TESTING must be true/false (or empty), got: {val!r}")
 
 
 class SoundController:
@@ -140,10 +94,8 @@ def load_line(line: str) -> dict:
     return _LINE_MAP[line]
 
 
-def build_reader(team_id, factory_id, station_id, testing: Optional[bool] = None) -> DefectReader:
+def build_reader(team_id, factory_id, station_id) -> DefectReader:
     """Compose the defect source. Only construction site for DatabaseReader."""
-    if testing is not None:
-        return StaticDefectReader(testing)
     source = PostgresDefectStatusSource(DB_CONFIG, team_id, factory_id, station_id)
     return DatabaseReader(source)
 
@@ -153,13 +105,12 @@ def main():
     parser.add_argument(
         "line",
         choices=tuple(_LINE_MAP),
-        help="Line to monitor (11, 12, or testing)",
+        help="Line to monitor (11 or 12)",
     )
     args = parser.parse_args()
 
     try:
         line_config = load_line(args.line)
-        testing = _testing_override(os.getenv("TESTING"))
     except (EnvironmentError, ValueError) as exc:
         logger.error(str(exc))
         sys.exit(1)
@@ -173,7 +124,7 @@ def main():
         f"line={args.line!r} team={team_id} factory={factory_id} station={station_id}"
     )
 
-    reader = build_reader(team_id, factory_id, station_id, testing=testing)
+    reader = build_reader(team_id, factory_id, station_id)
     speaker = SpeakerHandler(sound=sound, device=DEVICE)
     controller = SoundController(reader=reader, speaker=speaker, interval=CHECK_INTERVAL)
 

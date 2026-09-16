@@ -4,6 +4,7 @@ import pytest
 
 import monitor
 from get_latest_database_values import DatabaseUpdate
+from test_monitor_manual import StaticDefectReader, _testing_override
 
 
 class FakeSpeaker:
@@ -191,7 +192,7 @@ def test_alarm_clears_on_later_successful_read(monkeypatch, live_controller):
 def test_testing_true_sounds_without_database(monkeypatch):
     """Use a fixed true source. The speaker should sound with no database."""
     speaker = FakeSpeaker()
-    reader = monitor.StaticDefectReader(True)
+    reader = StaticDefectReader(True)
     ctl = monitor.SoundController(reader=reader, speaker=speaker)
     try:
         states = drive_monitor(monkeypatch, ctl, speaker, 1)
@@ -204,7 +205,7 @@ def test_testing_true_sounds_without_database(monkeypatch):
 def test_testing_false_stays_silent_without_database(monkeypatch):
     """Use a fixed false source. The speaker should stay quiet with no database."""
     speaker = FakeSpeaker()
-    reader = monitor.StaticDefectReader(False)
+    reader = StaticDefectReader(False)
     ctl = monitor.SoundController(reader=reader, speaker=speaker)
     try:
         states = drive_monitor(monkeypatch, ctl, speaker, 1)
@@ -286,23 +287,20 @@ def test_closed_controller_ignores_further_monitoring(monkeypatch, live_controll
 )
 def test_testing_override_parsing(raw, expected):
     """Raw TESTING text should map to a fixed override or database mode."""
-    assert monitor._testing_override(raw) == expected
+    assert _testing_override(raw) == expected
 
 
 def test_testing_override_rejects_unknown():
     """An unrecognized TESTING value should fail fast at composition time."""
     with pytest.raises(ValueError, match="TESTING"):
-        monitor._testing_override("maybe")
+        _testing_override("maybe")
 
 
-def test_build_reader_test_overrides_emit_fixed_values():
-    """Test overrides should emit their configured value without a database."""
-    for value in (True, False):
-        reader = monitor.build_reader(1, 2, 3, testing=value)
-        try:
-            updates = reader.poll()
-            assert [(update.kind, update.value) for update in updates] == [
-                ("defect", value)
-            ]
-        finally:
-            reader.close()
+def test_static_reader_close_stops_fixed_updates():
+    """Closing the fixed source should stop further fixed updates."""
+    reader = StaticDefectReader(True)
+    try:
+        assert reader.poll() != []
+    finally:
+        reader.close()
+    assert reader.poll() == []

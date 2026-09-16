@@ -1,4 +1,4 @@
-# FOR TESTING ONLY
+"""Manual test publisher for sending dummy defects over AMQP."""
 import argparse
 import datetime
 import os
@@ -37,11 +37,12 @@ class RabbitDAO:
         )
 
 
-RABBIT_DAO_ALERT = RabbitDAO(
-    RabbitClient(RABBIT_URL),
-    Exchange("autonomous_station_exchange", "direct", True, JsonPacker()),
-    "autonomous_defect_queue",
-)
+def _create_publisher() -> RabbitDAO:
+    return RabbitDAO(
+        RabbitClient(RABBIT_URL),
+        Exchange("autonomous_station_exchange", "direct", True, JsonPacker()),
+        "autonomous_defect_queue",
+    )
 
 
 def send_defect_amqp(
@@ -50,9 +51,12 @@ def send_defect_amqp(
     factory_id: int,
     station_id: int,
     s3_image: str = os.getenv("S3_IMAGE"),
+    publisher: Optional[RabbitDAO] = None,
 ) -> Tuple[datetime.datetime, bool]:
     dt = datetime.datetime.now(datetime.timezone.utc)
-    publish_success = RABBIT_DAO_ALERT.publish(
+    if publisher is None:
+        publisher = _create_publisher()
+    publish_success = publisher.publish(
         {
             "s3_image": s3_image,
             "defect_types": defect_types,

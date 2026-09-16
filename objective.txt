@@ -3,8 +3,9 @@ reusable PostgreSQL connection. `DatabaseReader` runs that source through one
 bounded background worker and exposes non-blocking updates to the monitor.
 
 `SoundController` depends only on the focused reader and speaker interfaces.
-The composition root in `monitor.py` injects the PostgreSQL implementation for
-production or a static reader for the `TESTING` override.
+The production composition root in `monitor.py` injects the PostgreSQL
+implementation only. The separated manual harness in `test_monitor_manual.py`
+provides the static fixed-defect reader for the `TESTING` override workflow.
 
 When the latest successful state reports a defect, play the configured sound.
 When it reports no defect, stop the sound. Retain the last successful state
